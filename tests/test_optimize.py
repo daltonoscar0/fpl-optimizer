@@ -428,3 +428,50 @@ def test_what_the_optimizer_returns_is_what_the_scorer_accepts(season, rules, co
     score = score_gameweek(plan.squad, season, DOUBLE_GW, rules)
     assert score.points > 0
     assert score.armband in plan.squad.starting
+
+
+# --- ties -------------------------------------------------------------------
+
+
+def test_a_tied_problem_is_solved_the_same_way_every_time(rules, config):
+    """Ties are common and a solver may return any optimum it likes.
+
+    Two defenders on identical projections is unremarkable, and the solver is
+    free to pick either. That showed up as a backtest total moving by six
+    points between identical runs, because the two tied players went on to
+    score differently. The decision is genuinely arbitrary; which arbitrary
+    answer it is should not be.
+    """
+    rows = [
+        (i, position, f"C{i // 3}", 45, 3.0)
+        for i, position in enumerate(
+            ["GKP"] * 2 + ["DEF"] * 8 + ["MID"] * 8 + ["FWD"] * 5, start=1
+        )
+    ]
+    frame = _frame(rows)
+
+    solved = {
+        (
+            tuple(plan.squad.starting),
+            tuple(plan.squad.bench),
+            plan.squad.captain,
+        )
+        for plan in (pick_squad(frame, rules, config=config) for _ in range(5))
+    }
+    assert len(solved) == 1
+
+
+def test_the_tie_break_cannot_outweigh_a_real_difference(rules, config):
+    """It is a nudge, not a preference: a tenth of a point still wins.
+
+    The whole tie-break term is bounded well under a thousandth of a point, so
+    it decides only between options the objective already considers equal.
+    """
+    rows = _spread(xpts=1.0)
+    # The highest player id, which the tie-break disfavours most, is also the
+    # best player by a margin the tie-break cannot touch.
+    rows[-1] = (15, "FWD", "E", 40, 1.1)
+    plan = pick_squad(_frame(rows), rules, config=config)
+
+    assert 15 in plan.squad.starting
+    assert plan.squad.captain == 15

@@ -123,27 +123,34 @@ records are written to `results/`.
 
 | Season | Strategy | Gameweeks decided | Points in common window | vs `naive` |
 |---|---|---|---|---|
-| 2023-24 | `model` | 34 of 34 | 2049 over 34 GWs | +226 |
-| 2023-24 | `naive` | 37 of 37 | 1823 over 34 GWs | — |
-| 2024-25 | `model` | 34 of 34 | 2073 over 34 GWs | +144 |
-| 2024-25 | `naive` | 37 of 37 | 1929 over 34 GWs | — |
-| 2025-26 | `model` | 34 of 34 | 1891 over 34 GWs | +98 |
-| 2025-26 | `naive` | 37 of 37 | 1793 over 34 GWs | — |
+| 2023-24 | `model` | 34 of 34 | 2049 over 34 GWs | +162 |
+| 2023-24 | `naive` | 37 of 37 | 1887 over 34 GWs | — |
+| 2024-25 | `model` | 34 of 34 | 2073 over 34 GWs | +143 |
+| 2024-25 | `naive` | 37 of 37 | 1930 over 34 GWs | — |
+| 2025-26 | `model` | 34 of 34 | 1891 over 34 GWs | +93 |
+| 2025-26 | `naive` | 37 of 37 | 1798 over 34 GWs | — |
 
-`ep` is omitted for 2023-24 — the published expected-points column rates 66% of
-non-appearances at exactly zero, so this strategy already knows who played. It
-scored 3349 (88.13 a gameweek), against a human record nearer 71.
+`ep` is omitted for 2023-24 — the published expected-points column rates 66% of non-appearances at exactly zero and scores past any human, so its total is not a comparable result; whether that is hindsight or unusually good injury news is not something this data can settle. It scored 3341 (87.92 a gameweek), against a human record nearer 71.
 
-`ep` is omitted for 2024-25 — the same column rates 64% of non-appearances at
-exactly zero. It scored 3197 (84.13 a gameweek). For 2025-26 it is not run at
-all: coverage is 29%, below the 80% threshold.
+`ep` is omitted for 2024-25 — the published expected-points column rates 64% of non-appearances at exactly zero and scores past any human, so its total is not a comparable result; whether that is hindsight or unusually good injury news is not something this data can settle. It scored 3186 (83.84 a gameweek), against a human record nearer 71.
 
-The model beats the naive baseline in all three seasons, by 98 to 226 points
-over 34 gameweeks — 3 to 7 points a gameweek. That is a real margin and a
-modest one, which is roughly what a linear model on public data should be
+For 2025-26 `ep` is not run at all: coverage is 29% of gameweeks, below the 80% threshold.
+
+The model beats the naive baseline in all three seasons, by 93 to 162 points
+over 34 gameweeks — roughly 3 to 5 points a gameweek. A real margin and a
+modest one, which is about what a linear model on public data should be
 expected to manage. A projection claiming much more than this against a
 baseline this crude would be worth re-checking for exactly the sort of problem
 the `ep` column turned out to have.
+
+One caveat on the baseline, which is the less solid half of the comparison.
+Points-per-fixture produces a great many *exactly equal* projections — whole
+blocks of players on 0.0, or on the same simple fraction — so the naive
+squad is riddled with ties, and before ties were broken deterministically the
+solver's arbitrary choice among them was worth up to ±70 points of its season
+total. The model's projections almost never tie, and its totals did not move at
+all. So the margins above are firm at the model's end and soft at the
+baseline's, by something like half the smallest of them.
 
 Totals are measured over the **common window**: the gameweeks every strategy in
 a season actually decided. They start in different places and that has to be
@@ -310,8 +317,25 @@ pytest -m network       # the few tests that may reach the network
 
 The full backtest — three seasons, three strategies, a model refit and an
 integer-program solve before every gameweek — takes about ten minutes on a
-laptop and is deterministic: re-running it reproduces every squad, transfer and
-score exactly.
+laptop and reproduces every squad, transfer and score exactly.
+
+That last part took a fix. Ties in the integer program are common — two
+defenders on identical projections is unremarkable — and a solver may return
+any optimum it likes among them. Two supposedly identical runs disagreed on
+one gameweek out of 111 because of it, and the total moved by six points,
+since the two tied players went on to score differently. The decision there is
+genuinely arbitrary, but *which* arbitrary answer it is should not be, so the
+objective now carries a deterministic nudge ordered by player id, bounded
+below a thousandth of a point. A test solves a fully tied problem five times
+and asserts one answer.
+
+Worth knowing what that implies about the figures above: where a projection
+cannot separate two players, the realized score of whichever is picked is luck.
+Measured by re-deciding every tie, that is worth up to ±70 points of a naive
+season — nearly half the smallest margin — and nothing at all to the model,
+whose projections rarely tie exactly. The headline survives it; the baseline is
+the noisy end of the comparison, and that is now said in **Results** rather
+than left for a reader to discover.
 
 The suite runs with network access blocked, so a test cannot accidentally pass
 against whatever the FPL API happened to be serving that day; the committed

@@ -60,6 +60,14 @@ CANDIDATE_COLUMNS: tuple[str, ...] = ("player_id", "position", "club", "price", 
 OPTIONAL_COLUMNS: tuple[str, ...] = ("xpts_future", "selling_price")
 
 
+#: Weight of the tie-break nudge on each binary, per place in player-id order.
+#: With ~700 candidates and 26 selected binaries the whole term stays under
+#: 1e-3 points, so it can only decide between options the objective already
+#: considers equal — and it makes the solve reproducible, which an arbitrary
+#: choice among tied optima is not.
+TIE_BREAK_SCALE = 1e-7
+
+
 class InfeasibleSquad(RuntimeError):
     """No legal squad exists for the inputs given.
 
@@ -94,7 +102,16 @@ class SquadPlan:
 def _solver(config: Config) -> pulp.LpSolver:
     """HiGHS if it is importable, CBC otherwise. Both ship with the deps."""
     try:
-        return pulp.HiGHS(msg=False, timeLimit=config.solver_time_limit)
+        # Single-threaded with a fixed seed and no optimality gap: a MIP gap
+        # lets the solver stop at a near-optimum, which is another way for two
+        # runs of the same problem to disagree.
+        return pulp.HiGHS(
+            msg=False,
+            timeLimit=config.solver_time_limit,
+            threads=1,
+            random_seed=0,
+            mip_rel_gap=0.0,
+        )
     except Exception:  # pragma: no cover - depends on the local build
         log.info("HiGHS unavailable, falling back to CBC")
         return pulp.PULP_CBC_CMD(msg=False, timeLimit=int(config.solver_time_limit))
@@ -267,6 +284,19 @@ def optimize_squad(
     hits = pulp.LpVariable("hits", lowBound=0, cat="Integer")
 
     bonus = rules.captain_multiplier - 1
+    # Ties are common — two defenders on identical projections are not unusual —
+    # and a solver is free to return any one of several optima. That showed up
+    # as a backtest whose total moved by six points between identical runs,
+    # because the two tied players went on to score differently. The decision
+    # is genuinely arbitrary; which arbitrary answer it is should not be.
+    #
+    # So the objective gets a deterministic nudge, ordered by player id. The
+    # whole term is bounded below a thousandth of a point, far under any
+    # difference that could matter to a score, and it makes the optimum unique
+    # and the run reproducible.
+    order = {pid: rank for rank, pid in enumerate(sorted(ids))}
+    tie_break = {i: -TIE_BREAK_SCALE * order[i] for i in ids}
+
     problem += (
         pulp.lpSum(starting[i] * xpts[i] for i in ids)
         + pulp.lpSum(
@@ -275,6 +305,7 @@ def optimize_squad(
         + pulp.lpSum(captain[i] * xpts[i] * bonus for i in ids)
         + pulp.lpSum(vice[i] * xpts[i] * config.vice_weight for i in ids)
         + pulp.lpSum(in_squad[i] * future[i] for i in ids)
+        + pulp.lpSum((in_squad[i] + starting[i]) * tie_break[i] for i in ids)
         - hits * rules.transfer_hit_cost
     )
 
