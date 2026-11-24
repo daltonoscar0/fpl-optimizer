@@ -475,3 +475,47 @@ def test_the_tie_break_cannot_outweigh_a_real_difference(rules, config):
 
     assert 15 in plan.squad.starting
     assert plan.squad.captain == 15
+
+
+def test_transfers_can_be_capped_for_their_marginal_value(rules, config):
+    """Solving for one, then two, then three is how each move is priced.
+
+    The objective nets hits, so the difference between consecutive solves is
+    what being allowed one more transfer is worth.
+    """
+    rows = _spread(xpts=1.0) + [
+        (60 + i, "FWD", "H", 40, 9.0 - i) for i in range(3)
+    ]
+    current = tuple(row[0] for row in _spread())
+
+    objectives = []
+    for cap in range(0, 4):
+        plan = optimize_squad(
+            _frame(rows),
+            rules,
+            config=config,
+            current=current,
+            free_transfers=5,
+            bank=0,
+            max_transfers=cap,
+        )
+        assert plan.n_transfers <= cap
+        objectives.append(plan.expected_points)
+
+    # Each additional transfer is worth something, and less than the one before:
+    # the best move is taken first.
+    margins = [b - a for a, b in zip(objectives, objectives[1:])]
+    assert all(m > 0 for m in margins)
+    assert margins == sorted(margins, reverse=True)
+
+
+def test_capping_transfers_at_zero_is_the_same_as_holding(rules, config):
+    rows = _spread(xpts=1.0) + [(60, "FWD", "H", 40, 9.0)]
+    current = tuple(row[0] for row in _spread())
+
+    held = optimize_squad(
+        _frame(rows), rules, config=config, current=current,
+        free_transfers=5, bank=0, max_transfers=0,
+    )
+    assert held.n_transfers == 0
+    assert set(held.squad.players) == set(current)
