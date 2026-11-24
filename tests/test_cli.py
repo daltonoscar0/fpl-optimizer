@@ -216,6 +216,37 @@ def test_table_prints_markdown_with_the_window_stated(hand_built, tmp_path):
     assert any("GWs" in l for l in lines)
 
 
+def test_table_omits_a_strategy_that_knows_who_played(monkeypatch, tmp_path):
+    """`ep` is left out of the comparison, with the reason printed.
+
+    Putting it in a table of results implies it is a baseline. It is not: the
+    archive's column rates most non-appearances at exactly zero.
+    """
+    from .fixtures.handbuilt import hand_built_season
+
+    data = hand_built_season()
+    df = data.player_gws.copy()
+    absent = df["minutes"].fillna(0) == 0
+    df.loc[absent, "ep"] = 0.0
+    df.loc[~absent, "ep"] = 4.0
+    data.player_gws = df
+    monkeypatch.setattr(cli, "load_season", lambda *a, **k: data)
+    monkeypatch.setattr(cli, "available_seasons", lambda: ("2024-25",))
+
+    runner.invoke(
+        cli.app, ["backtest", "2024-25", "--strategy", "all", "--out", str(tmp_path)]
+    )
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert any(s["strategy"] == "ep" for s in summary), "it is still run and kept"
+
+    result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    table_rows = [l for l in result.stdout.splitlines() if l.startswith("| 2")]
+    assert not any("`ep`" in row for row in table_rows)
+    assert "omitted" in result.stdout
+    assert "knows who played" in result.stdout
+
+
 def test_table_without_a_backtest_says_what_to_run(tmp_path):
     result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
     assert result.exit_code != 0

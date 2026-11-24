@@ -339,6 +339,16 @@ def table(
             else windows[entry["season"]] & scored
         )
 
+    # A strategy reading a column that already knows who played is not a
+    # baseline, and putting it in a comparison table implies it is one. It is
+    # omitted here and the reason is printed, the same treatment the
+    # average-manager row gets for being unavailable.
+    omitted = [entry for entry in summaries if not entry.get("comparable", True)]
+    omitted_keys = {(e["season"], e["strategy"]) for e in omitted}
+    summaries = [
+        e for e in summaries if (e["season"], e["strategy"]) not in omitted_keys
+    ]
+
     lines = [
         "| Season | Strategy | Gameweeks decided | Points in common window | "
         "vs `naive` |",
@@ -370,6 +380,17 @@ def table(
             f"| {entry['season']} | `{entry['strategy']}` | {decided} | "
             f"{window_points} over {len(window)} GWs | {delta} |"
         )
+
+    if omitted:
+        lines.append("")
+        for entry in sorted(omitted, key=lambda e: (e["season"], e["strategy"])):
+            lines.append(
+                f"`{entry['strategy']}` is omitted for {entry['season']} — "
+                f"{entry['not_comparable_because']}. It scored "
+                f"{entry['total_points']} "
+                f"({entry['points_per_gameweek']} a gameweek), against a human "
+                f"record nearer 71."
+            )
     print("\n".join(lines))
 
 

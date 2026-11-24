@@ -56,7 +56,12 @@ from .config import Config
 from .features import FeatureCache
 from .optimize import build_candidates, horizon_predictions, optimize_squad, pick_squad
 from .projections import STRATEGIES, JaxPointsModel
-from .projections.baselines import EP_COVERAGE_THRESHOLD, ep_coverage
+from .projections.baselines import (
+    EP_COVERAGE_THRESHOLD,
+    EP_HINDSIGHT_THRESHOLD,
+    ep_coverage,
+    ep_looks_like_hindsight,
+)
 from .rules import Rules
 from .schema import SeasonData
 from .score import GameweekScore, Squad, positions_from, score_gameweek
@@ -103,6 +108,12 @@ class BacktestResult:
     strategy: str
     records: list[GameweekRecord] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: False when this result cannot be compared with the others — not because
+    #: it is worse, but because it was produced by reading something the other
+    #: strategies could not have known. Reported, never silently dropped.
+    comparable: bool = True
+    #: Why, when it is not.
+    not_comparable_because: str | None = None
 
     @property
     def total_points(self) -> int:
@@ -182,6 +193,8 @@ class BacktestResult:
             "points_per_gameweek": round(self.points_per_gameweek, 2),
             "total_transfers": self.total_transfers,
             "total_hits": self.total_hits,
+            "comparable": self.comparable,
+            "not_comparable_because": self.not_comparable_because,
             "notes": list(self.notes),
         }
 
@@ -221,6 +234,17 @@ def backtest(
     result = BacktestResult(season=data.season, strategy=strategy)
     coverage, missing = ep_coverage(data)
     if strategy == "ep":
+        # Is the column a forecast at all? A pre-deadline figure cannot know
+        # who will not play; this one does, in every archive season.
+        hindsight_share, _ = ep_looks_like_hindsight(data)
+        if hindsight_share > EP_HINDSIGHT_THRESHOLD:
+            result.comparable = False
+            result.not_comparable_because = (
+                f"the published expected-points column rates "
+                f"{hindsight_share:.0%} of non-appearances at exactly zero, so "
+                f"this strategy already knows who played"
+            )
+            result.notes.append(result.not_comparable_because)
         result.notes.append(
             f"FPL expected points cover {coverage:.0%} of gameweeks "
             f"({len(data.gameweeks) - len(missing)} of {len(data.gameweeks)}); "
