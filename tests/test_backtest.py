@@ -165,6 +165,11 @@ def test_a_gameweek_with_no_projection_holds_the_squad(rules, config):
     assert held.squad == result.records[-2].squad
     # It still scores: the players still played.
     assert held.points != 0
+    # And a free transfer still accrues — no transfer was made, but the
+    # gameweek happened.
+    assert held.free_transfers_after == min(
+        rules.max_free_transfers, result.records[-2].free_transfers_after + 1
+    )
 
 
 def test_a_strategy_with_no_view_at_all_records_nothing(rules, config):

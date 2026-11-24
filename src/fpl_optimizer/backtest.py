@@ -310,11 +310,9 @@ def backtest(
         )
         cumulative += score.points
         used = len(bought)
-        free_transfers = (
-            free_transfers
-            if held
-            else _next_free_transfers(free_transfers, used, rules)
-        )
+        # A held gameweek is one where no transfer was *made*, not one that did
+        # not happen: the squad played, so a free transfer accrues as usual.
+        free_transfers = _next_free_transfers(free_transfers, used, rules)
 
         result.records.append(
             GameweekRecord(
