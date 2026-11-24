@@ -88,6 +88,12 @@ FIXTURE_COLUMNS: tuple[str, ...] = (
 )
 
 #: dtypes enforced on the player-gameweek frame so both sources are identical.
+#:
+#: Outcome columns use pandas' nullable integer dtypes. A gameweek that has not
+#: been played has no result, and ``Int16`` can say so; ``int16`` would have to
+#: write 0, making "scored nothing" and "has not played yet" the same value. The
+#: live source always carries such rows, so this is what keeps its frame
+#: dtype-identical to the archive's rather than silently upcast to float.
 PLAYER_GW_DTYPES: dict[str, str] = {
     "season": "string",
     "gw": "int16",
@@ -104,27 +110,27 @@ PLAYER_GW_DTYPES: dict[str, str] = {
     "kickoff_time": "string",
     "ep": "float32",
     "availability": "float32",
-    "minutes": "int16",
-    "points": "int16",
-    "bonus": "int16",
-    "bps": "int16",
-    "goals_scored": "int16",
-    "assists": "int16",
-    "clean_sheets": "int16",
-    "goals_conceded": "int16",
-    "own_goals": "int16",
-    "penalties_saved": "int16",
-    "penalties_missed": "int16",
-    "yellow_cards": "int16",
-    "red_cards": "int16",
-    "saves": "int16",
-    "starts": "int16",
-    "defensive_contribution": "int16",
-    "team_h_score": "int16",
-    "team_a_score": "int16",
-    "selected": "int64",
-    "transfers_in": "int64",
-    "transfers_out": "int64",
+    "minutes": "Int16",
+    "points": "Int16",
+    "bonus": "Int16",
+    "bps": "Int16",
+    "goals_scored": "Int16",
+    "assists": "Int16",
+    "clean_sheets": "Int16",
+    "goals_conceded": "Int16",
+    "own_goals": "Int16",
+    "penalties_saved": "Int16",
+    "penalties_missed": "Int16",
+    "yellow_cards": "Int16",
+    "red_cards": "Int16",
+    "saves": "Int16",
+    "starts": "Int16",
+    "defensive_contribution": "Int16",
+    "team_h_score": "Int16",
+    "team_a_score": "Int16",
+    "selected": "Int64",
+    "transfers_in": "Int64",
+    "transfers_out": "Int64",
 }
 
 
