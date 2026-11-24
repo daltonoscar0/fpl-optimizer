@@ -206,6 +206,20 @@ def normalize_archive_season(
     out["points"] = pd.to_numeric(df["total_points"], errors="coerce")
 
     out = out[out["gw"].notna() & out["player_id"].notna()]
+
+    # The archive's `xP` collection is patchy: in some gameweeks every player is
+    # recorded as 0.0, which is a failed snapshot rather than a forecast that
+    # nobody will score. Those gameweeks become null so the EP baseline reports
+    # itself unavailable instead of optimizing against a flat zero.
+    ep_zero_gws: list[int] = []
+    if "xP" in merged.columns:
+        for gw_val, grp in out.groupby("gw"):
+            vals = pd.to_numeric(grp["ep"], errors="coerce")
+            if vals.notna().any() and float(vals.abs().max()) == 0.0:
+                ep_zero_gws.append(int(gw_val))
+        if ep_zero_gws:
+            out.loc[out["gw"].isin(ep_zero_gws), "ep"] = float("nan")
+
     player_gws = coerce_player_gws(out).sort_values(
         ["gw", "player_id", "fixture_id"], kind="stable"
     )
@@ -213,6 +227,12 @@ def normalize_archive_season(
 
     if "xP" not in merged.columns:
         notes.append("no `xP` column: the FPL expected-points baseline is unavailable")
+    elif ep_zero_gws:
+        notes.append(
+            f"archive `xP` is all-zero (not collected) for {len(ep_zero_gws)} of "
+            f"{player_gws['gw'].nunique()} gameweeks: {ep_zero_gws} — treated as "
+            "missing, so the FPL expected-points baseline cannot decide those"
+        )
     if "defensive_contribution" not in merged.columns:
         notes.append(
             "no `defensive_contribution` column (scoring rule introduced in 2025-26)"
