@@ -70,6 +70,7 @@ from .live import (
 )
 from .optimize import (
     InfeasibleSquad,
+    pair_transfers,
     SquadPlan,
     build_candidates,
     horizon_predictions,
@@ -831,6 +832,12 @@ def transfers(
     max_hits: int = typer.Option(
         1, "--max-hits", help="most hit-taking transfers to consider"
     ),
+    transfers_wanted: int | None = typer.Option(
+        None,
+        "--transfers",
+        help="plan exactly this many transfers, rather than letting the "
+        "objective choose",
+    ),
     squad: str | None = typer.Option(
         None,
         "--squad",
@@ -999,7 +1006,9 @@ def transfers(
     )
 
     # --- three solves: hold, free only, with hits -------------------------
-    def solve(limit: int | None) -> SquadPlan:
+    def solve(
+        limit: int | None, *, exactly: int | None = None
+    ) -> SquadPlan:
         return optimize_squad(
             candidates,
             rule_set,
@@ -1008,6 +1017,8 @@ def transfers(
             free_transfers=banked,
             bank=money,
             max_hits=limit,
+            max_transfers=exactly,
+            min_transfers=exactly,
         )
 
     hold = optimize_squad(
@@ -1023,34 +1034,19 @@ def transfers(
     free_only = solve(0)
     with_hits = solve(max_hits) if max_hits > 0 else free_only
 
-    best = with_hits if with_hits.expected_points > free_only.expected_points else free_only
+    if transfers_wanted is not None:
+        best = solve(max_hits, exactly=transfers_wanted)
+        console.print(
+            f"Planning exactly {transfers_wanted} transfer(s), as asked."
+        )
+    else:
+        best = (
+            with_hits
+            if with_hits.expected_points > free_only.expected_points
+            else free_only
+        )
     hit_gain = with_hits.expected_points - free_only.expected_points
     gain = best.expected_points - hold.expected_points
-
-    # What is each individual transfer worth? Solve for one transfer, then two,
-    # then three, and difference the objectives: the k-th figure is the gain
-    # from being allowed one more move. Attributing a figure to a *named*
-    # transfer is only honest when the smaller plan is a subset of the larger —
-    # the optimizer is free to change its mind about which players to move when
-    # it gets another go, and often does.
-    chain: list[tuple[int, SquadPlan, float]] = []
-    previous = hold
-    nested = True
-    for k in range(1, best.n_transfers + 1):
-        step = optimize_squad(
-            candidates,
-            rule_set,
-            config=config,
-            current=held,
-            free_transfers=banked,
-            bank=money,
-            max_hits=max_hits,
-            max_transfers=k,
-        )
-        if not set(previous.transfers_in) <= set(step.transfers_in):
-            nested = False
-        chain.append((k, step, step.expected_points - previous.expected_points))
-        previous = step
 
     names = (
         data.player_gws.drop_duplicates("player_id")
@@ -1058,93 +1054,162 @@ def transfers(
         .astype(str)
     )
     positions = positions_from(data)
-    # Never print a squad that could not be fielded.
     best.squad.validate(positions, rule_set)
 
     def label(pid: int) -> str:
         return f"{names.get(pid, pid)} ({positions.get(pid, '?')})"
 
-    console.print(
-        f"GW{target} — {strategy}, horizon {horizon}, "
-        f"{banked} free transfer(s), {money / 10:.1f}m in the bank"
-    )
+    buy_price = {int(p): int(v) for p, v in prices.items()}
+    pair_prices = {**buy_price, **selling}
 
-    # --- the recommendation -----------------------------------------------
-    if not best.transfers_in:
-        console.print(
-            "\n[bold]Recommendation: no transfer.[/bold] Nothing available "
-            "beats holding, so roll the free transfer."
-        )
-    else:
-        table = Table(title=f"GW{target} recommended transfers")
+    def transfer_table(plan: SquadPlan, title: str) -> Table:
+        """A plan's moves, paired like-for-like so it can be entered as shown."""
+        table = Table(title=title)
         table.add_column("out")
         table.add_column("in")
         table.add_column("sell", justify="right")
         table.add_column("buy", justify="right")
-        for out_id, in_id in zip(best.transfers_out, best.transfers_in):
+        for out_id, in_id in pair_transfers(
+            plan.transfers_out, plan.transfers_in, positions, pair_prices
+        ):
             table.add_row(
                 label(out_id),
                 label(in_id),
                 f"{selling.get(out_id, 0) / 10:.1f}",
                 f"{int(prices.get(in_id, 0)) / 10:.1f}",
             )
-        console.print(table)
+        return table
+
+    console.print(
+        f"GW{target} — {strategy}, horizon {horizon}, "
+        f"{banked} free transfer(s), {money / 10:.1f}m in the bank"
+    )
+
+    # --- every plan size, each one whole ----------------------------------
+    # The best four-transfer plan is not the best five with a move removed:
+    # the optimizer changes its mind about which players it wants when the
+    # count changes. So each size is solved on its own and shown entire, and
+    # the advice compares plans rather than inviting one to be edited.
+    ceiling = max(best.n_transfers, 1)
+    plans: list[tuple[int, SquadPlan]] = [(0, hold)]
+    for size in range(1, ceiling + 1):
+        try:
+            plans.append((size, solve(max_hits, exactly=size)))
+        except InfeasibleSquad:
+            break
+
+    comparison = Table(title="every plan, solved on its own")
+    comparison.add_column("transfers", justify="right")
+    comparison.add_column("hit", justify="right")
+    comparison.add_column("expected points", justify="right")
+    comparison.add_column("vs holding", justify="right")
+    comparison.add_column("vs one fewer", justify="right")
+    comparison.add_column("confidence")
+    previous_points: float | None = None
+    thin_steps: list[int] = []
+    for size, plan in plans:
+        step = (
+            None if previous_points is None else plan.expected_points - previous_points
+        )
+        if step is not None and step < THIN_MARGIN:
+            thin_steps.append(size)
+        comparison.add_row(
+            str(size),
+            f"-{plan.transfer_hit}" if plan.transfer_hit else "0",
+            f"{plan.expected_points:.2f}",
+            f"{plan.expected_points - hold.expected_points:+.2f}",
+            "—" if step is None else f"{step:+.2f}",
+            ""
+            if step is None
+            else ("[yellow]thin[/yellow]" if step < THIN_MARGIN else "ok"),
+        )
+        previous_points = plan.expected_points
+    console.print(comparison)
+
+    chosen_size = best.n_transfers
+    console.print(
+        f"\n[bold]Recommended: the {chosen_size}-transfer plan.[/bold]"
+        if chosen_size
+        else "\n[bold]Recommended: no transfer — roll it.[/bold]"
+    )
+    def show(plan: SquadPlan, heading: str) -> None:
+        console.print(transfer_table(plan, heading))
         console.print(
-            f"Hit: [bold]{'-' + str(best.transfer_hit) if best.transfer_hit else 'none'}"
-            f"[/bold]  ·  bank after: {best.bank / 10:.1f}m"
+            f"  hit {'-' + str(plan.transfer_hit) if plan.transfer_hit else 'none'}"
+            f"  ·  bank after {plan.bank / 10:.1f}m"
+            f"  ·  {plan.expected_points - hold.expected_points:+.2f} vs holding"
         )
 
-        # --- what each move is worth on its own ---------------------------
-        margins = Table(title="expected-points margin behind each move")
-        margins.add_column("move")
-        margins.add_column("transfer" if nested else "plan")
-        margins.add_column("margin", justify="right")
-        margins.add_column("confidence")
-        low_confidence: list[str] = []
-        for k, step, margin in chain:
-            if nested and step.transfers_in:
-                added_in = set(step.transfers_in) - set(
-                    chain[k - 2][1].transfers_in if k > 1 else ()
+    if best.transfers_in:
+        show(best, f"GW{target}: the {chosen_size}-transfer plan, entire")
+
+    # The next size down, whole, because that is the real alternative — not
+    # this plan with a move taken out.
+    alternative = next(
+        (plan for size, plan in plans if size == chosen_size - 1 and plan.transfers_in),
+        None,
+    )
+    if alternative is not None:
+        console.print(
+            f"\n[bold]The alternative: the {alternative.n_transfers}-transfer "
+            f"plan.[/bold] Solved separately, and a different set of moves."
+        )
+        show(
+            alternative,
+            f"GW{target}: the {alternative.n_transfers}-transfer plan, entire",
+        )
+        # Compared as *pairs*, because a pair is what a row is: if the smaller
+        # plan's rows were a subset of the larger's, deleting rows would be a
+        # legitimate way to shrink it. Usually they are not.
+        def moves_of(plan: SquadPlan) -> set[tuple[int, int]]:
+            return set(
+                pair_transfers(
+                    plan.transfers_out, plan.transfers_in, positions, pair_prices
                 )
-                added_out = set(step.transfers_out) - set(
-                    chain[k - 2][1].transfers_out if k > 1 else ()
-                )
-                description = " · ".join(
-                    f"{label(o)} → {label(i)}"
-                    for o, i in zip(sorted(added_out), sorted(added_in))
-                ) or f"{k} transfers"
-            else:
-                description = f"{k} transfer(s) allowed"
-            thin = margin < THIN_MARGIN
-            if thin:
-                low_confidence.append(description)
-            margins.add_row(
-                f"#{k}",
-                description,
-                f"{margin:+.2f}",
-                "[yellow]low — under a point[/yellow]" if thin else "ok",
-            )
-        console.print(margins)
-        if not nested:
-            console.print(
-                "[dim]The margins are per additional transfer allowed, not per "
-                "named move: the optimizer changed which players it wanted when "
-                "given another go, so attributing a figure to one transfer "
-                "would misrepresent it.[/dim]"
-            )
-        if low_confidence:
-            console.print(
-                f"[yellow]Low confidence on {len(low_confidence)} move(s): a "
-                f"margin under {THIN_MARGIN:.0f} point is inside the "
-                f"projections' own error, so treat those as optional.[/yellow]"
             )
 
-    verdict = Table(title="is it worth it?")
+        shared = moves_of(best) & moves_of(alternative)
+        console.print(
+            f"  {len(shared)} of its {alternative.n_transfers} rows also appear "
+            f"in the {chosen_size}-transfer plan"
+        )
+        if not moves_of(alternative) <= moves_of(best):
+            only_here = moves_of(alternative) - moves_of(best)
+            console.print(
+                "  [yellow]and "
+                + ", ".join(
+                    f"{names.get(o, o)}→{names.get(i, i)}" for o, i in sorted(only_here)
+                )
+                + f" appears in neither — so deleting a row from the "
+                f"{chosen_size}-transfer plan does not give you this one.[/yellow]"
+            )
+
+    # --- how to choose between them ---------------------------------------
+    console.print(
+        "\n[bold]These are whole plans, not a menu.[/bold] Each row above was "
+        "solved from scratch for that number of transfers, and the sets differ "
+        "— the best four is not the best five with a move taken out. Pick one "
+        "row and enter it as it stands."
+    )
+    if thin_steps:
+        smaller = min(thin_steps) - 1
+        console.print(
+            f"[yellow]Going beyond {smaller} transfer(s) buys less than "
+            f"{THIN_MARGIN:.0f} point each time, which is inside the "
+            f"projections' own error. The {smaller}-transfer plan is the "
+            f"defensible stopping point; the longer ones are not wrong, just "
+            f"not evidenced.[/yellow]"
+        )
+    if transfers_wanted is None and chosen_size:
+        console.print(
+            f"[dim]Use --transfers N to see any size as its own plan.[/dim]"
+        )
+
+    verdict = Table(title="is a hit worth it?")
     verdict.add_column("plan")
     verdict.add_column("transfers", justify="right")
     verdict.add_column("hit", justify="right")
     verdict.add_column("expected points", justify="right")
-    verdict.add_column("vs holding", justify="right")
     for name, plan in (
         ("hold (roll the transfer)", hold),
         ("free transfers only", free_only),
@@ -1155,24 +1220,14 @@ def transfers(
             str(plan.n_transfers),
             f"-{plan.transfer_hit}" if plan.transfer_hit else "0",
             f"{plan.expected_points:.2f}",
-            f"{plan.expected_points - hold.expected_points:+.2f}",
         )
     console.print(verdict)
-    console.print(
-        f"Expected gain over the horizon versus rolling: "
-        f"[bold]{gain:+.2f}[/bold] points."
-        + (
-            f"  [yellow](under {THIN_MARGIN:.0f} point — low confidence)[/yellow]"
-            if 0 < gain < THIN_MARGIN
-            else ""
-        )
-    )
     if max_hits <= 0:
         console.print("Hits were not considered (--max-hits 0).")
-    elif best.transfer_hit == 0 and best.n_transfers <= banked:
+    elif with_hits.transfer_hit == 0 and with_hits.n_transfers <= banked:
         console.print(
             f"No hit needed: {banked} free transfer(s) cover the "
-            f"{best.n_transfers} worth making."
+            f"{with_hits.n_transfers} the objective wants."
         )
     elif hit_gain >= THIN_MARGIN:
         console.print(
@@ -1184,8 +1239,8 @@ def transfers(
         console.print(
             f"Taking a hit comes out {hit_gain:+.2f} points ahead, which is "
             f"[bold]too thin to act on[/bold]: the projections are not accurate "
-            f"to a fraction of a point, so this is a coin toss dressed as a "
-            f"recommendation. The free-transfer plan is the safer read."
+            f"to a fraction of a point. The free-transfer plan is the safer "
+            f"read."
         )
     else:
         console.print(
