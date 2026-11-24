@@ -98,6 +98,38 @@ jobs:
           git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
+      # GitHub disables scheduled workflows in public repositories after 60
+      # days with no repository activity. During the season this job commits a
+      # record most weeks, so the question never arises — but between late May
+      # and mid-August there are no gameweeks, no records, and therefore no
+      # commits for about eighty days. The schedule would be switched off
+      # exactly once a year, in the gap where nobody is watching it, and would
+      # come back to a season already under way.
+      #
+      # So when nothing has been committed for a while, commit the fact that
+      # the check ran. It is a heartbeat, kept out of results/live because it
+      # is not a record of anything.
+      - name: Heartbeat, so the schedule is not disabled for inactivity
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          last=$(git log -1 --format=%ct)
+          now=$(date -u +%s)
+          days=$(( (now - last) / 86400 ))
+          echo "last commit was $days days ago"
+          if [ "$days" -lt 45 ]; then
+            echo "Recent activity — no heartbeat needed."
+            exit 0
+          fi
+          printf 'last checked: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > .github/track-heartbeat
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/track-heartbeat
+          git commit -m "Heartbeat: keep the track schedule alive through the off-season"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('status.json') != ''
         with:
