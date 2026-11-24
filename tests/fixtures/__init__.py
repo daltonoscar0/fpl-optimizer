@@ -19,6 +19,7 @@ Three fixtures, because the tests ask three different questions.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -488,3 +489,56 @@ def live_payloads() -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, dic
         4: history(4, 1, False, 1),
     }
     return bootstrap, fixtures, summaries
+
+
+# --- a manager's public team --------------------------------------------------
+
+#: The recorded entry payloads are synthetic, not a real manager's. The shapes
+#: and field names come from the live endpoints — verified against a real entry
+#: — but a squad and transfer history are someone's own business even when the
+#: endpoint serving them is open, and this repository is public.
+ENTRY_ID = 4242
+
+
+def entry_payloads() -> dict[str, object]:
+    """``entry``, ``history``, ``transfers`` and ``picks`` for one manager.
+
+    Shaped like the real endpoints: a team started in gameweek 2, two transfers
+    made in gameweek 3, no chips played, and picks that carry no purchase or
+    selling prices — because the public endpoint does not serve them.
+    """
+    directory = FIXTURE_DIR / "entry"
+    return {
+        "entry": json.loads((directory / "entry.json").read_text()),
+        "history": json.loads((directory / "history.json").read_text()),
+        "transfers": json.loads((directory / "transfers.json").read_text()),
+        "picks": json.loads((directory / "picks-gw3.json").read_text()),
+    }
+
+
+class StubEntryClient:
+    """An :class:`~fpl_optimizer.api.FPLClient` that answers from the fixtures.
+
+    Only the four entry endpoints; anything else is an error, so a test that
+    starts reaching for the network says so rather than hanging.
+    """
+
+    def __init__(self, payloads: dict[str, object] | None = None) -> None:
+        self.payloads = payloads or entry_payloads()
+        self.calls: list[str] = []
+
+    def entry(self, team_id: int) -> dict:
+        self.calls.append(f"entry/{team_id}")
+        return self.payloads["entry"]
+
+    def entry_history(self, team_id: int) -> dict:
+        self.calls.append(f"history/{team_id}")
+        return self.payloads["history"]
+
+    def entry_transfers(self, team_id: int) -> list:
+        self.calls.append(f"transfers/{team_id}")
+        return self.payloads["transfers"]
+
+    def entry_picks(self, team_id: int, event: int) -> dict:
+        self.calls.append(f"picks/{team_id}/{event}")
+        return self.payloads["picks"]

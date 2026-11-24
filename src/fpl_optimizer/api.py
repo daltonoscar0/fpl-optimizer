@@ -38,6 +38,7 @@ ENDPOINTS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^event/\d+/live/$"),
     re.compile(r"^entry/\d+/$"),
     re.compile(r"^entry/\d+/history/$"),
+    re.compile(r"^entry/\d+/transfers/$"),
     re.compile(r"^entry/\d+/event/\d+/picks/$"),
 )
 
@@ -134,6 +135,15 @@ class FPLClient:
     def entry(self, team_id: int) -> dict[str, Any]:
         """A manager's public entry summary (name, bank, squad value, chips)."""
         return self.get(f"entry/{int(team_id)}/")
+
+    def entry_transfers(self, team_id: int) -> list[dict[str, Any]]:
+        """Every transfer a manager has made, with the prices paid and received.
+
+        The only public record of what a squad cost. ``picks`` serves the
+        squad but not its purchase prices, and selling price depends on them:
+        FPL returns the purchase price plus half of any profit.
+        """
+        return self.get(f"entry/{int(team_id)}/transfers/")
 
     def entry_history(self, team_id: int) -> dict[str, Any]:
         """A manager's per-gameweek history, including bank and squad value."""

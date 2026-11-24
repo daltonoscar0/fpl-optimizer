@@ -501,3 +501,191 @@ def test_track_rejects_an_unknown_strategy(live):
     result = runner.invoke(cli.app, ["track", "--strategies", "vibes"])
     assert result.exit_code != 0
     assert "unknown strategy" in result.stderr
+
+
+# --- transfers --------------------------------------------------------------
+
+
+@pytest.fixture
+def real_team(monkeypatch, tmp_path):
+    """A manager's team, the season, and the rules — all from fixtures.
+
+    `fpl transfers` reads four entry endpoints and the season; the stub answers
+    all of them, so the command is exercised without a request.
+    """
+    from fpl_optimizer.rules import archive_season_rules
+
+    from .fixtures import StubEntryClient, entry_payloads
+    from .fixtures.handbuilt import CLUBS, PLAYERS, hand_built_season
+
+    data = hand_built_season()
+    events = data.events.copy()
+    events.loc[events["gw"] == 3, "finished"] = False
+    upcoming = (datetime.now(timezone.utc) + timedelta(days=3)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    events.loc[events["gw"] == 3, "deadline_time"] = upcoming
+    data.events = events
+    data.source = "live"
+
+    payloads = entry_payloads()
+    bootstrap = {
+        "events": [
+            {
+                "id": int(row["gw"]),
+                "deadline_time": row["deadline_time"],
+                "finished": bool(row["finished"]),
+                "is_current": int(row["gw"]) == 2,
+                "is_next": int(row["gw"]) == 3,
+                "average_entry_score": row["average_entry_score"],
+            }
+            for row in data.events.to_dict("records")
+        ],
+        "elements": [{"id": pid} for pid in PLAYERS],
+    }
+
+    class Client(StubEntryClient):
+        def bootstrap_static(self):
+            return bootstrap
+
+        def fixtures(self):
+            return []
+
+    monkeypatch.setattr(cli, "FPLClient", lambda *a, **k: Client(payloads))
+    monkeypatch.setattr(cli, "load_live_season", lambda *a, **k: data)
+    monkeypatch.setattr(
+        cli, "rules_from_bootstrap", lambda *a, **k: archive_season_rules("2024-25")
+    )
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda *a, **k: Config(
+            excluded_clubs=(), horizon=2, results_dir=tmp_path
+        ),
+    )
+    return SimpleNamespace(data=data, payloads=payloads, bootstrap=bootstrap)
+
+
+def test_transfers_reads_the_team_and_recommends(real_team):
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert result.exit_code == 0, result.output
+    assert "Hand Built FC" in result.stdout
+    assert "is it worth it?" in result.stdout
+    assert "hold (roll the transfer)" in result.stdout
+    assert "starting XI" in result.stdout
+    assert "bench, in order" in result.stdout
+
+
+def test_transfers_reports_the_gain_against_rolling(real_team):
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert "Expected gain over the horizon versus rolling:" in result.stdout
+    # Holding is the baseline, so its row is always zero against itself.
+    assert "+0.00" in result.stdout
+
+
+def test_transfers_says_when_no_hit_is_needed(real_team):
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--free-transfers", "5"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No hit needed" in result.stdout or "no transfer" in result.stdout
+
+
+def test_transfers_can_be_told_not_to_consider_hits(real_team):
+    result = runner.invoke(
+        cli.app, ["transfers", "--team-id", "4242", "-s", "ep", "--max-hits", "0"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Hits were not considered" in result.stdout
+
+
+def test_transfers_warns_that_the_squad_may_be_stale(real_team):
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+    assert "not necessarily the squad now" in result.stdout
+
+
+def test_transfers_accepts_a_squad_given_by_hand(real_team):
+    """For when the picks endpoint is behind — it only knows the last deadline."""
+    squad = "1,7,3,5,8,10,13,2,6,9,11,14,4,12,15"
+    result = runner.invoke(
+        cli.app,
+        [
+            "transfers",
+            "--team-id",
+            "4242",
+            "-s",
+            "ep",
+            "--squad",
+            squad,
+            "--bank",
+            "1.5",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1.5m in the bank" in result.stdout
+    assert "rather than from the last deadline" in result.stdout
+
+
+def test_transfers_accepts_names_in_a_hand_given_squad(real_team):
+    names = (
+        "Keeper,Reserve,Fullback,Anchor,Stopper,Overlap,Marker,"
+        "Playmaker,Winger,Engine,Creator,Runner,Finisher,Poacher,Target"
+    )
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--squad", names, "--bank", "0"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "starting XI" in result.stdout
+
+
+def test_transfers_refuses_a_squad_of_the_wrong_size(real_team):
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--squad", "1,2,3", "--bank", "0"],
+    )
+
+    assert result.exit_code != 0
+    assert "needs 15 players" in result.stderr
+
+
+def test_transfers_refuses_an_ambiguous_name_rather_than_guessing(
+    real_team, monkeypatch
+):
+    data = real_team.data
+    frame = data.player_gws.copy()
+    frame.loc[frame["player_id"] == 9, "name"] = "Keeper"
+    data.player_gws = frame
+
+    squad = (
+        "Keeper,Reserve,Fullback,Anchor,Stopper,Overlap,Marker,"
+        "Playmaker,Winger,Engine,Creator,Runner,Finisher,Poacher,Target"
+    )
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--squad", squad, "--bank", "0"],
+    )
+
+    assert result.exit_code != 0
+    assert "matches more than one player" in result.stderr
+
+
+def test_transfers_needs_a_team_or_a_squad(real_team):
+    result = runner.invoke(cli.app, ["transfers", "-s", "ep"])
+    assert result.exit_code != 0
+    assert "--team-id" in result.stderr
+
+
+def test_transfers_rejects_an_unknown_strategy(real_team):
+    result = runner.invoke(
+        cli.app, ["transfers", "--team-id", "4242", "-s", "vibes"]
+    )
+    assert result.exit_code != 0
+    assert "unknown strategy" in result.stderr
