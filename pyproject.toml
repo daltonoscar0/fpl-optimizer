@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fpl-optimizer"
+version = "0.1.0"
+description = "Integer-programming squad and transfer optimizer for Fantasy Premier League, with leakage-free backtests"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Oscar Dalton", email = "daltonoscar0@gmail.com" }]
+keywords = ["fantasy-premier-league", "integer-programming", "optimization", "backtesting", "jax"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Intended Audience :: Science/Research",
+]
+dependencies = [
+  "pulp>=2.8",
+  "highspy>=1.7",
+  "jax>=0.4.26",
+  "jaxlib>=0.4.26",
+  "optax>=0.2.2",
+  "pandas>=2.2",
+  "numpy>=1.26",
+  "requests>=2.31",
+  "typer>=0.12",
+  "rich>=13.7",
+  "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+
+[project.scripts]
+fpl = "fpl_optimizer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/daltonoscar0/fpl-optimizer"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["network: test requires live network access (deselected in CI)"]
