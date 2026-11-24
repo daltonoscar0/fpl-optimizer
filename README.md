@@ -33,6 +33,7 @@ fpl project 2025-26 38 --strategy model      # expected points for one gameweek
 fpl backtest all --strategy all              # walk every season forward, score it
 fpl table                                    # the results table below, as Markdown
 fpl track                                    # call this gameweek, score the last
+fpl transfers --team-id 9715000              # advise a real team, read-only
 ```
 
 Every command prints the data's *notes* alongside the numbers. A projection
@@ -228,6 +229,47 @@ Three consequences, all of them in the code rather than only here:
 It is still run, and `results/` keeps its full per-gameweek records, so all of
 the above can be checked rather than taken on trust. On live data none of it
 applies: `ep_next` really is published in advance, and the model will use it.
+
+## Advising a real team
+
+```sh
+fpl transfers --team-id YOUR_ID [--horizon 4] [--max-hits 1]
+```
+
+Read-only and public: no login, and nothing outside the allowlist in `api.py`.
+It reads the squad and bank from `entry/{id}/event/{gw}/picks`, the transfer
+history from `entry/{id}/transfers`, and runs the same projections, the same
+integer program and the same club exclusions as the backtest.
+
+Two things have to be reconstructed, because the public API serves a squad but
+not its price history:
+
+- **Selling price.** FPL returns what you paid plus half of any rise, rounded
+  down, so a player's value depends on your purchase price — which `picks`
+  omits. A player transferred in carries their cost in the transfer record; an
+  original pick cost what they were priced at in the gameweek the team started,
+  which `element-summary` retains. Both exact, neither needs an account.
+- **Free transfers.** Also absent, and recoverable by replaying the season: one
+  a gameweek, banked to the cap, spent on transfers, untouched by a wildcard or
+  free hit. The replay is checked against the hits FPL actually charged, and
+  says so if the two disagree rather than advising on a bad number.
+
+A useful incidental: FPL's `value` field is the squad at *current* prices
+**plus the bank** — verified across ten gameweeks of a real entry, where
+`value == sum(prices) + bank` held exactly every time. Treating it as squad
+value would double-count the bank, so it is used only as a cross-check: if it
+does not reconcile, the prices or the squad are wrong and the output says so.
+
+The answer comes with its alternatives — hold and roll, spend free transfers
+only, or take a hit — each with its expected-points gain over the horizon. A
+hit is only recommended when it beats the free-transfer plan after paying for
+itself, and a margin under a point is reported as too thin to act on, because
+the projections are nowhere near that accurate.
+
+`picks` only knows the last deadline. If you have transferred since, pass
+`--squad` with 15 names or ids and `--bank`. Names match FPL's display name,
+accents optional; an ambiguous one ("Wilson" matches three players) is refused
+rather than guessed, since advising on the wrong Wilson is worse than asking.
 
 ## Live record
 

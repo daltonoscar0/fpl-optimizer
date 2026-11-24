@@ -212,6 +212,7 @@ def optimize_squad(
     free_transfers: int = 0,
     bank: int = 0,
     budget: int | None = None,
+    max_hits: int | None = None,
     must_include: tuple[int, ...] = (),
     must_exclude: tuple[int, ...] = (),
     allow_excluded_clubs: bool = False,
@@ -231,6 +232,11 @@ def optimize_squad(
     budget:
         Overrides ``rules.budget`` for a fresh pick. Ignored when ``current`` is
         given, where the budget is the bank plus sale proceeds.
+    max_hits:
+        Cap on hit-taking transfers. ``0`` forbids them outright, which is how
+        "what do my free transfers alone buy" is asked; ``None`` leaves the
+        objective to decide, which it does by weighing each hit's four points
+        against what the transfer brings in.
     allow_excluded_clubs:
         :attr:`Config.excluded_clubs` is honoured by default — those clubs are
         never bought. A player already owned is never *forced* out by it.
@@ -349,6 +355,8 @@ def optimize_squad(
             + pulp.lpSum(selling[i] * (1 - in_squad[i]) for i in owned)
         )
         problem += hits >= pulp.lpSum(in_squad[i] for i in incoming) - free_transfers
+        if max_hits is not None:
+            problem += hits <= int(max_hits)
     else:
         problem += (
             pulp.lpSum(price[i] * in_squad[i] for i in ids)

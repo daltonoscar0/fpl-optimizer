@@ -8,6 +8,7 @@ pointed at the committed archive slice so no command reaches the network.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -23,6 +24,17 @@ from fpl_optimizer.config import Config
 from .fixtures import ARCHIVE_SEASON, load_archive_fixture
 
 runner = CliRunner()
+
+#: Rich styles its error output, and whether it does depends on the terminal:
+#: on CI a flag like `--team-id` arrives as several separately-coloured spans,
+#: so `"--team-id" in stderr` passes locally and fails there. Assertions go
+#: through this instead of depending on colour detection.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(text: str) -> str:
+    """CLI output with the styling stripped."""
+    return _ANSI.sub("", text)
 
 
 @pytest.fixture(autouse=True)
@@ -48,41 +60,41 @@ def test_no_arguments_prints_the_help():
     """Exit code 2 is click's convention for "no command given", not a crash."""
     result = runner.invoke(cli.app, [])
     assert result.exit_code == 2
-    assert "Fantasy Premier League" in result.stdout
+    assert "Fantasy Premier League" in plain(result.stdout)
     for command in ("seasons", "rules", "data", "project"):
-        assert command in result.stdout
+        assert command in plain(result.stdout)
 
 
 def test_seasons_lists_every_backtest_season():
     result = runner.invoke(cli.app, ["seasons"])
     assert result.exit_code == 0
     for season in available_seasons():
-        assert season in result.stdout
+        assert season in plain(result.stdout)
 
 
 def test_rules_prints_the_rule_set_and_its_provenance():
     result = runner.invoke(cli.app, ["rules", "2024-25"])
     assert result.exit_code == 0
-    assert "squad size" in result.stdout
-    assert "100.0m" in result.stdout
+    assert "squad size" in plain(result.stdout)
+    assert "100.0m" in plain(result.stdout)
     # The archive has no rules snapshot, so the source must say it is asserted.
-    assert "asserted" in result.stdout
+    assert "asserted" in plain(result.stdout)
 
 
 def test_rules_formation_covers_all_four_positions():
     result = runner.invoke(cli.app, ["rules", "2023-24"])
     assert result.exit_code == 0
     for position in ("GKP", "DEF", "MID", "FWD"):
-        assert position in result.stdout
+        assert position in plain(result.stdout)
 
 
 def test_data_summarizes_the_season_and_prints_its_notes():
     result = runner.invoke(cli.app, ["data", ARCHIVE_SEASON])
     assert result.exit_code == 0
-    assert "player-gameweek rows" in result.stdout
-    assert "notes" in result.stdout
+    assert "player-gameweek rows" in plain(result.stdout)
+    assert "notes" in plain(result.stdout)
     # The slice's known gap is reported rather than hidden.
-    assert "all-zero" in result.stdout
+    assert "all-zero" in plain(result.stdout)
 
 
 def test_data_warns_when_expected_points_coverage_is_too_low():
@@ -93,7 +105,7 @@ def test_data_warns_when_expected_points_coverage_is_too_low():
     """
     result = runner.invoke(cli.app, ["data", ARCHIVE_SEASON])
     assert result.exit_code == 0
-    assert "coverage" in result.stdout
+    assert "coverage" in plain(result.stdout)
 
 
 @pytest.mark.parametrize("strategy", ["naive", "ep"])
@@ -102,8 +114,8 @@ def test_project_prints_a_board_for_each_baseline(strategy):
         cli.app, ["project", ARCHIVE_SEASON, "8", "--strategy", strategy, "--top", "5"]
     )
     assert result.exit_code == 0
-    assert "xPts" in result.stdout
-    assert "GW8" in result.stdout
+    assert "xPts" in plain(result.stdout)
+    assert "GW8" in plain(result.stdout)
 
 
 def test_project_rejects_an_unknown_strategy():
@@ -112,7 +124,7 @@ def test_project_rejects_an_unknown_strategy():
     )
     assert result.exit_code != 0
     # typer writes parameter errors to stderr.
-    assert "unknown strategy" in result.stderr
+    assert "unknown strategy" in plain(result.stderr)
 
 
 def test_project_says_so_when_a_strategy_has_nothing_to_say():
@@ -121,7 +133,7 @@ def test_project_says_so_when_a_strategy_has_nothing_to_say():
         cli.app, ["project", ARCHIVE_SEASON, "7", "--strategy", "ep"]
     )
     assert result.exit_code == 0
-    assert "reported" in result.stdout or "unavailable" in result.stdout
+    assert "reported" in plain(result.stdout) or "unavailable" in plain(result.stdout)
 
 
 def test_project_on_a_gameweek_with_no_fixtures_is_not_an_error():
@@ -129,7 +141,7 @@ def test_project_on_a_gameweek_with_no_fixtures_is_not_an_error():
         cli.app, ["project", ARCHIVE_SEASON, "99", "--strategy", "naive"]
     )
     assert result.exit_code == 0
-    assert "No projection" in result.stdout
+    assert "No projection" in plain(result.stdout)
 
 
 # --- backtest and table -----------------------------------------------------
@@ -192,7 +204,7 @@ def test_backtest_skips_expected_points_below_the_coverage_threshold(
         ["backtest", "2024-25", "--strategy", "ep", "--out", str(tmp_path)],
     )
     assert result.exit_code == 0
-    assert "skipped" in result.stdout
+    assert "skipped" in plain(result.stdout)
     assert not (tmp_path / "2024-25-ep.csv").exists()
 
 
@@ -202,7 +214,7 @@ def test_backtest_rejects_an_unknown_strategy(hand_built, tmp_path):
         ["backtest", "2024-25", "--strategy", "vibes", "--out", str(tmp_path)],
     )
     assert result.exit_code != 0
-    assert "unknown strategy" in result.stderr
+    assert "unknown strategy" in plain(result.stderr)
 
 
 def test_table_prints_markdown_with_the_window_stated(hand_built, tmp_path):
@@ -212,7 +224,7 @@ def test_table_prints_markdown_with_the_window_stated(hand_built, tmp_path):
     result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    lines = [l for l in result.stdout.splitlines() if l.startswith("|")]
+    lines = [l for l in plain(result.stdout).splitlines() if l.startswith("|")]
     assert lines[0].startswith("| Season | Strategy |")
     assert "common window" in lines[0]
     # One header, one separator, one row per strategy.
@@ -246,16 +258,16 @@ def test_table_omits_a_strategy_whose_total_is_not_comparable(monkeypatch, tmp_p
 
     result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
     assert result.exit_code == 0, result.output
-    table_rows = [l for l in result.stdout.splitlines() if l.startswith("| 2")]
+    table_rows = [l for l in plain(result.stdout).splitlines() if l.startswith("| 2")]
     assert not any("`ep`" in row for row in table_rows)
-    assert "omitted" in result.stdout
-    assert "not a comparable result" in result.stdout
+    assert "omitted" in plain(result.stdout)
+    assert "not a comparable result" in plain(result.stdout)
 
 
 def test_table_without_a_backtest_says_what_to_run(tmp_path):
     result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
     assert result.exit_code != 0
-    assert "fpl backtest" in result.stderr
+    assert "fpl backtest" in plain(result.stderr)
 
 
 # --- track ------------------------------------------------------------------
@@ -388,7 +400,7 @@ def test_track_records_the_upcoming_gameweek(live):
     rec = json.loads(written[0].read_text())
     assert rec["gw"] == 3
     assert len(rec["squad"]) == 15
-    assert "Recorded GW3" in result.stdout
+    assert "Recorded GW3" in plain(result.stdout)
 
 
 def test_track_scores_nothing_on_its_first_run(live):
@@ -400,8 +412,8 @@ def test_track_scores_nothing_on_its_first_run(live):
     result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
 
     assert result.exit_code == 0
-    assert "recommended XI scored" not in result.stdout
-    assert "no gameweek called in advance yet" in result.stdout
+    assert "recommended XI scored" not in plain(result.stdout)
+    assert "no gameweek called in advance yet" in plain(result.stdout)
 
 
 def test_track_does_nothing_once_the_gameweek_is_on_record(live):
@@ -410,8 +422,8 @@ def test_track_does_nothing_once_the_gameweek_is_on_record(live):
     result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
 
     assert result.exit_code == 0
-    assert "Nothing to do" in result.stdout
-    assert "already on record" in result.stdout
+    assert "Nothing to do" in plain(result.stdout)
+    assert "already on record" in plain(result.stdout)
 
 
 def test_track_refuses_to_record_once_the_deadline_has_passed(live):
@@ -423,7 +435,7 @@ def test_track_refuses_to_record_once_the_deadline_has_passed(live):
 
     result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
     assert result.exit_code == 0
-    assert "deadline has passed" in result.stdout
+    assert "deadline has passed" in plain(result.stdout)
     assert not list((results_dir / "live").glob("*-gw03-*.json"))
 
 
@@ -458,7 +470,7 @@ def test_track_dry_run_decides_but_writes_nothing(live):
     result = runner.invoke(cli.app, ["track", "--strategies", "ep", "--dry-run"])
 
     assert result.exit_code == 0
-    assert "GW3 recommendation" in result.stdout
+    assert "GW3 recommendation" in plain(result.stdout)
     assert not list((results_dir / "live").glob("*.json"))
 
 
@@ -481,8 +493,8 @@ def test_track_scores_a_gameweek_that_was_called_in_advance(live):
 
     result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
     assert result.exit_code == 0, result.output
-    assert "GW2 ep: scored" in result.stdout
-    assert "average manager 70" in result.stdout
+    assert "GW2 ep: scored" in plain(result.stdout)
+    assert "average manager 70" in plain(result.stdout)
     assert (results_dir / "live" / "2024-25.csv").exists()
 
     # The table gains its first row, with the gap to the average manager.
@@ -500,4 +512,192 @@ def test_track_scores_a_gameweek_that_was_called_in_advance(live):
 def test_track_rejects_an_unknown_strategy(live):
     result = runner.invoke(cli.app, ["track", "--strategies", "vibes"])
     assert result.exit_code != 0
-    assert "unknown strategy" in result.stderr
+    assert "unknown strategy" in plain(result.stderr)
+
+
+# --- transfers --------------------------------------------------------------
+
+
+@pytest.fixture
+def real_team(monkeypatch, tmp_path):
+    """A manager's team, the season, and the rules — all from fixtures.
+
+    `fpl transfers` reads four entry endpoints and the season; the stub answers
+    all of them, so the command is exercised without a request.
+    """
+    from fpl_optimizer.rules import archive_season_rules
+
+    from .fixtures import StubEntryClient, entry_payloads
+    from .fixtures.handbuilt import CLUBS, PLAYERS, hand_built_season
+
+    data = hand_built_season()
+    events = data.events.copy()
+    events.loc[events["gw"] == 3, "finished"] = False
+    upcoming = (datetime.now(timezone.utc) + timedelta(days=3)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    events.loc[events["gw"] == 3, "deadline_time"] = upcoming
+    data.events = events
+    data.source = "live"
+
+    payloads = entry_payloads()
+    bootstrap = {
+        "events": [
+            {
+                "id": int(row["gw"]),
+                "deadline_time": row["deadline_time"],
+                "finished": bool(row["finished"]),
+                "is_current": int(row["gw"]) == 2,
+                "is_next": int(row["gw"]) == 3,
+                "average_entry_score": row["average_entry_score"],
+            }
+            for row in data.events.to_dict("records")
+        ],
+        "elements": [{"id": pid} for pid in PLAYERS],
+    }
+
+    class Client(StubEntryClient):
+        def bootstrap_static(self):
+            return bootstrap
+
+        def fixtures(self):
+            return []
+
+    monkeypatch.setattr(cli, "FPLClient", lambda *a, **k: Client(payloads))
+    monkeypatch.setattr(cli, "load_live_season", lambda *a, **k: data)
+    monkeypatch.setattr(
+        cli, "rules_from_bootstrap", lambda *a, **k: archive_season_rules("2024-25")
+    )
+    monkeypatch.setattr(
+        cli,
+        "Config",
+        lambda *a, **k: Config(
+            excluded_clubs=(), horizon=2, results_dir=tmp_path
+        ),
+    )
+    return SimpleNamespace(data=data, payloads=payloads, bootstrap=bootstrap)
+
+
+def test_transfers_reads_the_team_and_recommends(real_team):
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert result.exit_code == 0, result.output
+    assert "Hand Built FC" in plain(result.stdout)
+    assert "is it worth it?" in plain(result.stdout)
+    assert "hold (roll the transfer)" in plain(result.stdout)
+    assert "starting XI" in plain(result.stdout)
+    assert "bench, in order" in plain(result.stdout)
+
+
+def test_transfers_reports_the_gain_against_rolling(real_team):
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert "Expected gain over the horizon versus rolling:" in plain(result.stdout)
+    # Holding is the baseline, so its row is always zero against itself.
+    assert "+0.00" in plain(result.stdout)
+
+
+def test_transfers_says_when_no_hit_is_needed(real_team):
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--free-transfers", "5"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "No hit needed" in plain(result.stdout) or "no transfer" in plain(result.stdout)
+
+
+def test_transfers_can_be_told_not_to_consider_hits(real_team):
+    result = runner.invoke(
+        cli.app, ["transfers", "--team-id", "4242", "-s", "ep", "--max-hits", "0"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Hits were not considered" in plain(result.stdout)
+
+
+def test_transfers_warns_that_the_squad_may_be_stale(real_team):
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+    assert "not necessarily the squad now" in plain(result.stdout)
+
+
+def test_transfers_accepts_a_squad_given_by_hand(real_team):
+    """For when the picks endpoint is behind — it only knows the last deadline."""
+    squad = "1,7,3,5,8,10,13,2,6,9,11,14,4,12,15"
+    result = runner.invoke(
+        cli.app,
+        [
+            "transfers",
+            "--team-id",
+            "4242",
+            "-s",
+            "ep",
+            "--squad",
+            squad,
+            "--bank",
+            "1.5",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1.5m in the bank" in plain(result.stdout)
+    assert "rather than from the last deadline" in plain(result.stdout)
+
+
+def test_transfers_accepts_names_in_a_hand_given_squad(real_team):
+    names = (
+        "Keeper,Reserve,Fullback,Anchor,Stopper,Overlap,Marker,"
+        "Playmaker,Winger,Engine,Creator,Runner,Finisher,Poacher,Target"
+    )
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--squad", names, "--bank", "0"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "starting XI" in plain(result.stdout)
+
+
+def test_transfers_refuses_a_squad_of_the_wrong_size(real_team):
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--squad", "1,2,3", "--bank", "0"],
+    )
+
+    assert result.exit_code != 0
+    assert "needs 15 players" in plain(result.stderr)
+
+
+def test_transfers_refuses_an_ambiguous_name_rather_than_guessing(
+    real_team, monkeypatch
+):
+    data = real_team.data
+    frame = data.player_gws.copy()
+    frame.loc[frame["player_id"] == 9, "name"] = "Keeper"
+    data.player_gws = frame
+
+    squad = (
+        "Keeper,Reserve,Fullback,Anchor,Stopper,Overlap,Marker,"
+        "Playmaker,Winger,Engine,Creator,Runner,Finisher,Poacher,Target"
+    )
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--squad", squad, "--bank", "0"],
+    )
+
+    assert result.exit_code != 0
+    assert "matches more than one player" in plain(result.stderr)
+
+
+def test_transfers_needs_a_team_or_a_squad(real_team):
+    result = runner.invoke(cli.app, ["transfers", "-s", "ep"])
+    assert result.exit_code != 0
+    assert "--team-id" in plain(result.stderr)
+
+
+def test_transfers_rejects_an_unknown_strategy(real_team):
+    result = runner.invoke(
+        cli.app, ["transfers", "--team-id", "4242", "-s", "vibes"]
+    )
+    assert result.exit_code != 0
+    assert "unknown strategy" in plain(result.stderr)

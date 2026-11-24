@@ -16,6 +16,8 @@ an honest inventory of what the project can actually do:
     Walk a season forward, deciding before each gameweek and scoring after it.
 ``fpl table``
     Turn the backtest summary into the Markdown table in the README.
+``fpl transfers``
+    Recommend transfers for a real team, read from the public endpoints.
 ``fpl track``
     Before the deadline: record a squad per strategy and FPL's published
     expected points for every player. After the gameweek: every player's
@@ -44,6 +46,7 @@ from .archive import available_seasons, load_season
 from .backtest import BacktestResult, compare
 from .backtest import backtest as run_backtest
 from .config import Config
+from .entry import EntryUnavailable, load_entry, resolve_players
 from .features import FeatureCache
 from .live import (
     current_season,
@@ -52,7 +55,13 @@ from .live import (
     next_gw,
     season_from_event_live,
 )
-from .optimize import InfeasibleSquad
+from .optimize import (
+    InfeasibleSquad,
+    SquadPlan,
+    build_candidates,
+    horizon_predictions,
+    optimize_squad,
+)
 from .projections import STRATEGIES
 from .projections.baselines import EP_COVERAGE_THRESHOLD, ep_coverage
 from .rules import archive_season_rules, rules_from_bootstrap
@@ -82,6 +91,11 @@ app = typer.Typer(
     help="Squad and transfer optimizer for Fantasy Premier League.",
 )
 console = Console()
+
+#: Expected-points margin below which a recommendation is not worth making.
+#: The projections carry far more error than this, so a tenth of a point of
+#: advantage is noise with a decimal point on it.
+THIN_MARGIN = 1.0
 
 
 def _verbose(flag: bool) -> None:
@@ -657,6 +671,314 @@ def track(
         _print_notes(loaded)
 
     finish()
+
+
+@app.command()
+def transfers(
+    team_id: int | None = typer.Option(
+        None, "--team-id", help="your FPL entry id, from the URL of your team page"
+    ),
+    horizon: int = typer.Option(4, "--horizon", help="gameweeks to look ahead"),
+    max_hits: int = typer.Option(
+        1, "--max-hits", help="most hit-taking transfers to consider"
+    ),
+    squad: str | None = typer.Option(
+        None,
+        "--squad",
+        help="15 names or ids, comma-separated, if your squad has changed "
+        "since the last deadline",
+    ),
+    bank: float | None = typer.Option(
+        None, "--bank", help="money in the bank, in millions, with --squad"
+    ),
+    free_transfers: int | None = typer.Option(
+        None, "--free-transfers", help="override the replayed free-transfer count"
+    ),
+    strategy: str = typer.Option("model", "--strategy", "-s"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Recommend transfers for a real team, read-only.
+
+    Reads the squad, bank and transfer history from the public endpoints — no
+    login, nothing outside the read-only allowlist — and runs the same
+    projections, the same integer program and the same club exclusions the
+    backtest uses. Selling prices are reconstructed from what you paid, because
+    FPL returns the purchase price plus half of any profit.
+
+    Three solves, so the answer comes with its alternatives: hold and roll the
+    free transfer, spend free transfers only, or take a hit. The expected-points
+    gain of each is reported against holding, and a hit is recommended only when
+    it beats the free-transfer-only plan after paying for itself.
+
+    The public endpoint serves the squad as of the last deadline. If you have
+    transferred since, pass ``--squad`` with what you actually own.
+    """
+    _verbose(verbose)
+    config = Config()
+    if strategy not in STRATEGIES:
+        raise typer.BadParameter(
+            f"unknown strategy {strategy!r}: choose from {sorted(STRATEGIES)}"
+        )
+    if team_id is None and squad is None:
+        raise typer.BadParameter("give --team-id, or --squad with --bank")
+    if squad is not None and bank is None and team_id is None:
+        raise typer.BadParameter("--squad needs --bank (in millions)")
+
+    console.print("Fetching the current season (one request per player)…")
+    client = FPLClient(config=config)
+    bootstrap = client.bootstrap_static()
+    rule_set = rules_from_bootstrap(bootstrap, config)
+    rule_set.validate()
+    target = next_gw(bootstrap)
+    if target is None:
+        console.print("[yellow]No upcoming gameweek to plan for.[/yellow]")
+        raise typer.Exit(code=0)
+
+    with console.status("loading") as spinner:
+        data = load_live_season(
+            client=client,
+            config=config,
+            bootstrap=bootstrap,
+            fixtures=client.fixtures(),
+            progress=lambda done, total: spinner.update(
+                f"player histories {done}/{total}"
+            ),
+        )
+
+    # --- what do we own, and what is it worth to us? ----------------------
+    notes: list[str] = []
+    state = None
+    if team_id is not None:
+        state = load_entry(client, team_id, data, rule_set)
+        held = state.squad
+        money = state.bank
+        banked = state.free_transfers
+        purchase = dict(state.purchase)
+        notes.extend(state.notes)
+        console.print(
+            f"\n[bold]{state.name}[/bold] ({state.manager}) — entry {state.team_id}, "
+            f"started GW{state.started_event}"
+        )
+    else:
+        held, money, banked, purchase = (), 0, 1, {}
+
+    if squad is not None:
+        named = [token for token in squad.replace(";", ",").split(",") if token.strip()]
+        try:
+            held, _ = resolve_players(named, data, gw=target)
+        except EntryUnavailable as exc:
+            # A misread name would advise on someone else's squad, so this is
+            # a refusal rather than a guess — but it should read like one.
+            raise typer.BadParameter(str(exc)) from None
+        if len(held) != rule_set.squad_size:
+            raise typer.BadParameter(
+                f"--squad needs {rule_set.squad_size} players, got {len(held)}"
+            )
+        if bank is not None:
+            money = int(round(bank * 10))
+        notes.append(
+            f"squad taken from --squad rather than from the last deadline's picks"
+        )
+        if state is not None:
+            # Purchase prices still come from the transfer history where the
+            # player appears in it; the rest fall back to today's price.
+            purchase = {
+                pid: state.purchase.get(pid, 0) for pid in held
+            }
+            missing = [pid for pid, paid in purchase.items() if not paid]
+            if missing:
+                notes.append(
+                    f"{len(missing)} player(s) in --squad were never transferred "
+                    f"in by this entry, so their purchase price is unknown and "
+                    f"today's price is used: selling prices may be overstated"
+                )
+        else:
+            notes.append(
+                "no --team-id, so purchase prices are unknown: selling prices "
+                "are assumed equal to current prices"
+            )
+
+    if free_transfers is not None:
+        banked = int(free_transfers)
+        notes.append(f"free transfers overridden to {banked}")
+
+    prices = (
+        data.player_gws[data.player_gws["gw"] <= target]
+        .sort_values(["player_id", "gw"])
+        .drop_duplicates("player_id", keep="last")
+        .set_index("player_id")["price"]
+    )
+    if not purchase:
+        purchase = {pid: int(prices.get(pid, 0)) for pid in held}
+    selling = {
+        pid: rule_set.selling_price(int(paid), int(prices.get(pid, paid)))
+        for pid, paid in purchase.items()
+    }
+
+    # --- project ----------------------------------------------------------
+    projection = STRATEGIES[strategy]()
+    projection.fit(data, target)
+    preds = projection.predict(data, target)
+    if preds.empty or float(preds["xpts"].abs().max()) == 0.0:
+        console.print(
+            f"[yellow]{strategy} has no projection for GW{target}, so there is "
+            f"nothing to recommend.[/yellow]"
+        )
+        raise typer.Exit(code=0)
+    future = horizon_predictions(
+        projection, data, target, horizon=horizon, decay=config.horizon_decay
+    )
+    candidates = build_candidates(
+        data, target, preds, future=future, selling_prices=selling
+    )
+
+    # --- three solves: hold, free only, with hits -------------------------
+    def solve(limit: int | None) -> SquadPlan:
+        return optimize_squad(
+            candidates,
+            rule_set,
+            config=config,
+            current=held,
+            free_transfers=banked,
+            bank=money,
+            max_hits=limit,
+        )
+
+    hold = optimize_squad(
+        candidates,
+        rule_set,
+        config=config,
+        current=held,
+        free_transfers=banked,
+        bank=money,
+        max_hits=0,
+        must_include=tuple(held),
+    )
+    free_only = solve(0)
+    with_hits = solve(max_hits) if max_hits > 0 else free_only
+
+    best = with_hits if with_hits.expected_points > free_only.expected_points else free_only
+    hit_gain = with_hits.expected_points - free_only.expected_points
+    gain = best.expected_points - hold.expected_points
+
+    names = (
+        data.player_gws.drop_duplicates("player_id")
+        .set_index("player_id")["name"]
+        .astype(str)
+    )
+    positions = positions_from(data)
+    # Never print a squad that could not be fielded.
+    best.squad.validate(positions, rule_set)
+
+    def label(pid: int) -> str:
+        return f"{names.get(pid, pid)} ({positions.get(pid, '?')})"
+
+    console.print(
+        f"GW{target} — {strategy}, horizon {horizon}, "
+        f"{banked} free transfer(s), {money / 10:.1f}m in the bank"
+    )
+
+    # --- the recommendation -----------------------------------------------
+    if not best.transfers_in:
+        console.print(
+            "\n[bold]Recommendation: no transfer.[/bold] Nothing available "
+            "beats holding, so roll the free transfer."
+        )
+    else:
+        table = Table(title=f"GW{target} recommended transfers")
+        table.add_column("out")
+        table.add_column("in")
+        table.add_column("sell", justify="right")
+        table.add_column("buy", justify="right")
+        for out_id, in_id in zip(best.transfers_out, best.transfers_in):
+            table.add_row(
+                label(out_id),
+                label(in_id),
+                f"{selling.get(out_id, 0) / 10:.1f}",
+                f"{int(prices.get(in_id, 0)) / 10:.1f}",
+            )
+        console.print(table)
+        console.print(
+            f"Hit: [bold]{'-' + str(best.transfer_hit) if best.transfer_hit else 'none'}"
+            f"[/bold]  ·  bank after: {best.bank / 10:.1f}m"
+        )
+
+    verdict = Table(title="is it worth it?")
+    verdict.add_column("plan")
+    verdict.add_column("transfers", justify="right")
+    verdict.add_column("hit", justify="right")
+    verdict.add_column("expected points", justify="right")
+    verdict.add_column("vs holding", justify="right")
+    for name, plan in (
+        ("hold (roll the transfer)", hold),
+        ("free transfers only", free_only),
+        (f"up to {max_hits} hit(s)", with_hits),
+    ):
+        verdict.add_row(
+            name,
+            str(plan.n_transfers),
+            f"-{plan.transfer_hit}" if plan.transfer_hit else "0",
+            f"{plan.expected_points:.2f}",
+            f"{plan.expected_points - hold.expected_points:+.2f}",
+        )
+    console.print(verdict)
+    console.print(
+        f"Expected gain over the horizon versus rolling: "
+        f"[bold]{gain:+.2f}[/bold] points."
+    )
+    if max_hits <= 0:
+        console.print("Hits were not considered (--max-hits 0).")
+    elif best.transfer_hit == 0 and best.n_transfers <= banked:
+        console.print(
+            f"No hit needed: {banked} free transfer(s) cover the "
+            f"{best.n_transfers} worth making."
+        )
+    elif hit_gain >= THIN_MARGIN:
+        console.print(
+            f"Taking a hit is [bold green]worth it[/bold green]: "
+            f"{hit_gain:+.2f} points beyond what the free transfers manage, "
+            f"after paying the {with_hits.transfer_hit}-point charge."
+        )
+    elif hit_gain > 0:
+        console.print(
+            f"Taking a hit comes out {hit_gain:+.2f} points ahead, which is "
+            f"[bold]too thin to act on[/bold]: the projections are not accurate "
+            f"to a fraction of a point, so this is a coin toss dressed as a "
+            f"recommendation. The free-transfer plan is the safer read."
+        )
+    else:
+        console.print(
+            f"Taking a hit is [bold]not worth it[/bold]: it would bring in "
+            f"{abs(hit_gain):.2f} points less than it costs."
+        )
+
+    xi = Table(title=f"GW{target} starting XI")
+    xi.add_column("role")
+    xi.add_column("player")
+    xi.add_column("xPts", justify="right")
+    detail = best.detail
+    for pid in best.squad.starting:
+        role = (
+            "captain"
+            if pid == best.squad.captain
+            else "vice" if pid == best.squad.vice else positions.get(pid, "")
+        )
+        xi.add_row(role, str(names.get(pid, pid)), f"{detail.get(pid, 0.0):.2f}")
+    console.print(xi)
+
+    bench = Table(title="bench, in order")
+    bench.add_column("#")
+    bench.add_column("player")
+    bench.add_column("xPts", justify="right")
+    for n, pid in enumerate(best.squad.bench, start=1):
+        bench.add_row(str(n), label(pid), f"{detail.get(pid, 0.0):.2f}")
+    console.print(bench)
+
+    if notes:
+        console.print("\n[bold]notes on your team[/bold]")
+        for note in notes:
+            console.print(f"  • {note}")
+    _print_notes(data)
 
 
 def _latest_recommendation(

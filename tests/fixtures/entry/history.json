@@ -1,0 +1,36 @@
+{
+  "chips": [],
+  "past": [],
+  "current": [
+    {
+      "event": 1,
+      "points": 50,
+      "total_points": 50,
+      "bank": 15,
+      "value": 1000,
+      "event_transfers": 0,
+      "event_transfers_cost": 0,
+      "points_on_bench": 4
+    },
+    {
+      "event": 2,
+      "points": 44,
+      "total_points": 94,
+      "bank": 15,
+      "value": 1000,
+      "event_transfers": 0,
+      "event_transfers_cost": 0,
+      "points_on_bench": 2
+    },
+    {
+      "event": 3,
+      "points": 26,
+      "total_points": 120,
+      "bank": 8,
+      "value": 996,
+      "event_transfers": 2,
+      "event_transfers_cost": 0,
+      "points_on_bench": 9
+    }
+  ]
+}
