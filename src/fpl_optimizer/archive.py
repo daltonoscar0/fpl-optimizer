@@ -206,13 +206,56 @@ def normalize_archive_season(
     out["points"] = pd.to_numeric(df["total_points"], errors="coerce")
 
     out = out[out["gw"].notna() & out["player_id"].notna()]
+
+    # The archive's `xP` collection is patchy: in some gameweeks every player is
+    # recorded as 0.0, which is a failed snapshot rather than a forecast that
+    # nobody will score. Those gameweeks become null so the EP baseline reports
+    # itself unavailable instead of optimizing against a flat zero.
+    ep_zero_gws: list[int] = []
+    if "xP" in merged.columns:
+        for gw_val, grp in out.groupby("gw"):
+            vals = pd.to_numeric(grp["ep"], errors="coerce")
+            if vals.notna().any() and float(vals.abs().max()) == 0.0:
+                ep_zero_gws.append(int(gw_val))
+        if ep_zero_gws:
+            out.loc[out["gw"].isin(ep_zero_gws), "ep"] = float("nan")
+
     player_gws = coerce_player_gws(out).sort_values(
         ["gw", "player_id", "fixture_id"], kind="stable"
     )
     player_gws = player_gws.reset_index(drop=True)
 
+    # Does the published figure already know who played? It should not be able
+    # to: FPL quotes an `ep_next` for every registered player before the
+    # deadline, including the nailed starter who is then a surprise omission.
+    if "xP" in merged.columns:
+        # Imported here rather than at module scope: the projections package
+        # pulls in JAX, and loading a CSV should not cost that.
+        from .projections.baselines import EP_HINDSIGHT_THRESHOLD
+
+        absent = player_gws[
+            pd.to_numeric(player_gws["minutes"], errors="coerce").fillna(0) == 0
+        ]["ep"]
+        absent = pd.to_numeric(absent, errors="coerce").dropna()
+        if len(absent):
+            share_zero = float((absent == 0).mean())
+            if share_zero > EP_HINDSIGHT_THRESHOLD:
+                notes.append(
+                    f"archive `xP` knows who played: {share_zero:.0%} of "
+                    f"player-gameweeks with zero minutes are rated exactly 0.0, "
+                    f"which a pre-deadline forecast could not do. The FPL "
+                    f"expected-points baseline is therefore not comparable with "
+                    f"strategies that had to guess playing time"
+                )
+
     if "xP" not in merged.columns:
         notes.append("no `xP` column: the FPL expected-points baseline is unavailable")
+    elif ep_zero_gws:
+        notes.append(
+            f"archive `xP` is all-zero (not collected) for {len(ep_zero_gws)} of "
+            f"{player_gws['gw'].nunique()} gameweeks: {ep_zero_gws} — treated as "
+            "missing, so the FPL expected-points baseline cannot decide those"
+        )
     if "defensive_contribution" not in merged.columns:
         notes.append(
             "no `defensive_contribution` column (scoring rule introduced in 2025-26)"
