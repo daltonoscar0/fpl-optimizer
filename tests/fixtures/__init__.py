@@ -542,3 +542,24 @@ class StubEntryClient:
     def entry_picks(self, team_id: int, event: int) -> dict:
         self.calls.append(f"picks/{team_id}/{event}")
         return self.payloads["picks"]
+
+
+# --- recorded payloads for ingestion -----------------------------------------
+
+
+def ingest_payloads() -> dict[str, object]:
+    """``bootstrap``, ``fixtures`` and one ``event/{gw}/live`` per gameweek.
+
+    Shaped like the live endpoints and built from the hand-built season, so an
+    ingested gameweek can be checked against figures written out by hand in
+    :mod:`tests.fixtures.handbuilt` — including its double and its blank.
+    """
+    directory = FIXTURE_DIR / "ingest"
+    return {
+        "bootstrap": json.loads((directory / "bootstrap.json").read_text()),
+        "fixtures": json.loads((directory / "fixtures.json").read_text()),
+        "live": {
+            gw: json.loads((directory / f"event-live-gw{gw}.json").read_text())
+            for gw in (1, 2)
+        },
+    }

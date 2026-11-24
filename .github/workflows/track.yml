@@ -44,6 +44,7 @@ jobs:
       scored: ${{ steps.summary.outputs.scored }}
       outcomes: ${{ steps.summary.outputs.outcomes }}
       missed: ${{ steps.summary.outputs.missed }}
+      ingest_failed: ${{ steps.ingest.outputs.failed }}
       next_gw: ${{ steps.summary.outputs.next_gw }}
       next_deadline: ${{ steps.summary.outputs.next_deadline }}
     steps:
@@ -69,6 +70,27 @@ jobs:
           echo '--- status.json ---'
           cat status.json
 
+      # A gameweek is ingested once FPL marks its data *checked*, not merely
+      # finished: bonus points and appearances are revised for a day or two
+      # after the whistle, and ingesting on `finished` would capture figures
+      # that are still moving. Already-ingested gameweeks are skipped, so this
+      # usually does nothing.
+      - name: Ingest finished gameweeks
+        id: ingest
+        run: |
+          set -o pipefail
+          if fpl ingest 2>&1 | tee ingest.log; then
+            echo "failed=" >> "$GITHUB_OUTPUT"
+          else
+            # A gameweek whose data is checked but which will not ingest is
+            # worth a notification: the season data stops where it stopped, and
+            # every projection after it trains on less than it should.
+            echo "failed=$(grep -oE 'GW[0-9]+' ingest.log | tail -1)" >> "$GITHUB_OUTPUT"
+            echo "::warning::ingestion failed; see the issue"
+          fi
+          grep -cE "^GW[0-9]+: [0-9]+ rows" ingest.log > /dev/null && \
+            echo "ingested=yes" >> "$GITHUB_OUTPUT" || true
+
       - name: Read the status
         id: summary
         if: always() && hashFiles('status.json') != ''
@@ -92,15 +114,15 @@ jobs:
       - name: Commit the record
         if: ${{ !inputs.dry_run }}
         run: |
-          if [ -z "$(git status --porcelain results/live)" ]; then
-            echo "No new records — nothing to commit."
+          if [ -z "$(git status --porcelain results/live data/ingested)" ]; then
+            echo "No new records or gameweeks — nothing to commit."
             exit 0
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add results/live
+          git add results/live data/ingested
           git commit -m "$(printf 'Record live gameweek data\n\n%s\n\nWritten by the scheduled track workflow (run %s).' \
-            "$(git diff --cached --name-only | sed 's/^/  /')" "$GITHUB_RUN_ID")"
+            "$(git diff --cached --name-only | sed 's|^|  |')" "$GITHUB_RUN_ID")"
           # Rebase rather than force: a human commit landing mid-run must win.
           git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
@@ -149,7 +171,7 @@ jobs:
   # to the repository.
   notify:
     needs: track
-    if: always() && (needs.track.result == 'failure' || needs.track.outputs.missed != '')
+    if: always() && (needs.track.result == 'failure' || needs.track.outputs.missed != '' || needs.track.outputs.ingest_failed != '')
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -163,6 +185,7 @@ jobs:
         env:
           RESULT: ${{ needs.track.result }}
           MISSED: ${{ needs.track.outputs.missed }}
+          INGEST_FAILED: ${{ needs.track.outputs.ingest_failed }}
           NEXT_GW: ${{ needs.track.outputs.next_gw }}
           NEXT_DEADLINE: ${{ needs.track.outputs.next_deadline }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -171,11 +194,24 @@ jobs:
           import os, pathlib
 
           missed = os.environ.get("MISSED", "").strip()
+          ingest_failed = os.environ.get("INGEST_FAILED", "").strip()
           next_gw = os.environ.get("NEXT_GW") or "?"
           deadline = os.environ.get("NEXT_DEADLINE") or "unknown"
           run_url = os.environ["RUN_URL"]
 
-          if missed:
+          if ingest_failed:
+              key = "season data: ingestion failed"
+              body = f"""A gameweek whose data FPL has marked checked would not ingest, so the
+          season data stops short of it.
+
+          **Failed at:** {ingest_failed}
+          **Run:** {run_url}
+
+          Nothing is lost permanently — ingestion is idempotent and the next run
+          will try again — but until it succeeds every projection trains on less
+          history than it should.
+          """
+          elif missed:
               key = "live record: missed gameweek"
               body = f"""A deadline passed with nothing on record, so those gameweeks can never
           be scored: `fpl track` will not score a gameweek it did not call in

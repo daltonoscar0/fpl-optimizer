@@ -34,6 +34,7 @@ fpl backtest all --strategy all              # walk every season forward, score 
 fpl table                                    # the results table below, as Markdown
 fpl track                                    # call this gameweek, score the last
 fpl transfers --team-id 9715000              # advise a real team, read-only
+fpl ingest                                   # build this season into archive format
 ```
 
 Every command prints the data's *notes* alongside the numbers. A projection
@@ -229,6 +230,48 @@ Three consequences, all of them in the code rather than only here:
 It is still run, and `results/` keeps its full per-gameweek records, so all of
 the above can be checked rather than taken on trust. On live data none of it
 applies: `ep_next` really is published in advance, and the model will use it.
+
+## This season, built as it goes
+
+The community archive publishes a season months after it ends, so there is no
+archive for the one in progress — and without one, a model has nothing recent
+to train on. `fpl ingest` builds it: each gameweek whose data FPL has marked
+**checked** is written into the archive's own CSV format under
+`data/ingested/<season>/`, which means the same loader reads it and the schema
+is identical by construction rather than by agreement.
+
+`data_checked` rather than `finished` is the gate. The whistle blows and
+`finished` goes true, but bonus points and appearances are revised for a day or
+two afterwards; ingesting on `finished` would capture figures that are still
+moving. Once a gameweek is in, it is never rewritten — a rewrite would silently
+change what a model was trained on — which also makes re-running safe, and the
+scheduled job runs six times a day.
+
+Field provenance is written next to the data as
+[`PROVENANCE.md`](data/ingested/2026-27/PROVENANCE.md), because some of it is
+exact and some is not:
+
+| field | source | exact? |
+|---|---|---|
+| every scoring stat, and the fixtures played | `event/{gw}/live`, one request a gameweek | **exact** |
+| kickoff, scores, home/away, opponent | `fixtures` | **exact** |
+| price at that gameweek's deadline | the weekly pre-deadline snapshot, or `element-summary` | **exact** when either is available |
+| price with neither available | today's price | **approximated**, and flagged |
+| `selected`, transfers in/out | `element-summary` only | zero when not fetched |
+| position, and club for a mid-season transfer | `bootstrap-static`, which describes players as they are *now* | **approximated** |
+| `xP` | — | **absent**: FPL does not retain its own past expected points |
+
+That last gap is why the weekly snapshot exists. Going forward the price comes
+from it for free, so appending a gameweek costs **one request**.
+
+Live projections train on this, walk-forward in exactly the sense the backtest
+is: the history holds only gameweeks already final, and the gameweek being
+predicted contributes nothing but pre-deadline facts. Asking for it when that
+gameweek is already ingested is an error, not a silent fit on the answer.
+
+The ingested season also carries something no archive season can: the
+**average-manager score** per gameweek, captured while the API was still
+serving it.
 
 ## Advising a real team
 

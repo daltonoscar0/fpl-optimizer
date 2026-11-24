@@ -1,0 +1,269 @@
+{
+  "events": [
+    {
+      "id": 1,
+      "deadline_time": "2024-09-01T11:30:00Z",
+      "finished": true,
+      "data_checked": true,
+      "is_current": false,
+      "is_next": false,
+      "average_entry_score": 50
+    },
+    {
+      "id": 2,
+      "deadline_time": "2024-09-02T11:30:00Z",
+      "finished": true,
+      "data_checked": true,
+      "is_current": true,
+      "is_next": false,
+      "average_entry_score": 70
+    },
+    {
+      "id": 3,
+      "deadline_time": "2024-09-03T11:30:00Z",
+      "finished": false,
+      "data_checked": false,
+      "is_current": false,
+      "is_next": true,
+      "average_entry_score": 0
+    }
+  ],
+  "teams": [
+    {
+      "id": 1,
+      "name": "Reds",
+      "short_name": "RED",
+      "strength": 3
+    },
+    {
+      "id": 2,
+      "name": "Blues",
+      "short_name": "BLU",
+      "strength": 3
+    },
+    {
+      "id": 3,
+      "name": "Greens",
+      "short_name": "GRN",
+      "strength": 3
+    },
+    {
+      "id": 4,
+      "name": "Whites",
+      "short_name": "WHT",
+      "strength": 3
+    },
+    {
+      "id": 5,
+      "name": "Blacks",
+      "short_name": "BLK",
+      "strength": 3
+    },
+    {
+      "id": 6,
+      "name": "Golds",
+      "short_name": "GLD",
+      "strength": 3
+    }
+  ],
+  "element_types": [
+    {
+      "id": 1,
+      "singular_name_short": "GKP"
+    },
+    {
+      "id": 2,
+      "singular_name_short": "DEF"
+    },
+    {
+      "id": 3,
+      "singular_name_short": "MID"
+    },
+    {
+      "id": 4,
+      "singular_name_short": "FWD"
+    }
+  ],
+  "elements": [
+    {
+      "id": 1,
+      "web_name": "Keeper",
+      "element_type": 1,
+      "team": 1,
+      "now_cost": 45,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 2,
+      "web_name": "Playmaker",
+      "element_type": 3,
+      "team": 1,
+      "now_cost": 85,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 3,
+      "web_name": "Fullback",
+      "element_type": 2,
+      "team": 2,
+      "now_cost": 50,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 4,
+      "web_name": "Finisher",
+      "element_type": 4,
+      "team": 2,
+      "now_cost": 120,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 5,
+      "web_name": "Anchor",
+      "element_type": 2,
+      "team": 1,
+      "now_cost": 55,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 6,
+      "web_name": "Winger",
+      "element_type": 3,
+      "team": 2,
+      "now_cost": 75,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 7,
+      "web_name": "Reserve",
+      "element_type": 1,
+      "team": 3,
+      "now_cost": 40,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 8,
+      "web_name": "Stopper",
+      "element_type": 2,
+      "team": 3,
+      "now_cost": 45,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 9,
+      "web_name": "Engine",
+      "element_type": 3,
+      "team": 3,
+      "now_cost": 60,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 10,
+      "web_name": "Overlap",
+      "element_type": 2,
+      "team": 4,
+      "now_cost": 50,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 11,
+      "web_name": "Creator",
+      "element_type": 3,
+      "team": 4,
+      "now_cost": 95,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 12,
+      "web_name": "Poacher",
+      "element_type": 4,
+      "team": 4,
+      "now_cost": 70,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 13,
+      "web_name": "Marker",
+      "element_type": 2,
+      "team": 5,
+      "now_cost": 45,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 14,
+      "web_name": "Runner",
+      "element_type": 3,
+      "team": 5,
+      "now_cost": 55,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 15,
+      "web_name": "Target",
+      "element_type": 4,
+      "team": 5,
+      "now_cost": 65,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 16,
+      "web_name": "Sweeper",
+      "element_type": 2,
+      "team": 6,
+      "now_cost": 40,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 17,
+      "web_name": "Deep",
+      "element_type": 3,
+      "team": 6,
+      "now_cost": 50,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    },
+    {
+      "id": 18,
+      "web_name": "Understudy",
+      "element_type": 4,
+      "team": 6,
+      "now_cost": 45,
+      "ep_next": "4.0",
+      "status": "a",
+      "chance_of_playing_next_round": 100
+    }
+  ]
+}

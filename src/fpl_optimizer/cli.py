@@ -16,6 +16,9 @@ an honest inventory of what the project can actually do:
     Walk a season forward, deciding before each gameweek and scoring after it.
 ``fpl table``
     Turn the backtest summary into the Markdown table in the README.
+``fpl ingest``
+    Build finished gameweeks of the current season into the archive's format,
+    so a model can train on this season walk-forward.
 ``fpl transfers``
     Recommend transfers for a real team, read from the public endpoints.
 ``fpl track``
@@ -47,6 +50,16 @@ from .backtest import BacktestResult, compare
 from .backtest import backtest as run_backtest
 from .config import Config
 from .entry import EntryUnavailable, load_entry, resolve_players
+from .ingest import (
+    IngestFailed,
+    season_with_upcoming,
+    append_gameweek,
+    ingest_gameweek,
+    ingested_gameweeks,
+    load_ingested_season,
+    write_provenance,
+    write_reference,
+)
 from .features import FeatureCache
 from .live import (
     current_season,
@@ -674,6 +687,142 @@ def track(
 
 
 @app.command()
+def ingest(
+    season: str | None = typer.Option(
+        None, "--season", help="defaults to the season now in progress"
+    ),
+    gw: int | None = typer.Option(None, "--gw", help="one gameweek, not all"),
+    with_prices: bool = typer.Option(
+        True,
+        "--prices/--no-prices",
+        help="fetch the per-gameweek price series (one request per player)",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="build, write nothing"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Build finished gameweeks of the current season into the archive's format.
+
+    The archive publishes a season months after it ends, so this builds one as
+    the season runs: each gameweek whose data FPL has marked *checked* is
+    written into the same CSV layout the archive ships, which means the same
+    loader reads it and a model can train on this season walk-forward exactly
+    as the backtest trains on a completed one.
+
+    A gameweek is ingested once and never rewritten — FPL revises results for a
+    day or two, and a rewrite would silently change what a model was trained
+    on. Re-running is therefore safe and usually does nothing.
+    """
+    _verbose(verbose)
+    config = Config()
+    client = FPLClient(config=config)
+    bootstrap = client.bootstrap_static()
+    fixtures = client.fixtures()
+    season_label = season or current_season(bootstrap)
+
+    # `finished` goes true when the last whistle blows; `data_checked` goes
+    # true when FPL is done revising bonus points and appearances. Ingesting on
+    # the former would capture figures that are still moving.
+    checked = [
+        int(event["id"])
+        for event in bootstrap.get("events") or []
+        if event.get("data_checked")
+    ]
+    already = ingested_gameweeks(season_label, config)
+    wanted = [gw] if gw is not None else checked
+    todo = [g for g in wanted if g not in already]
+
+    console.print(
+        f"{season_label}: {len(checked)} gameweek(s) with checked data, "
+        f"{len(already)} already ingested, {len(todo)} to do"
+    )
+    # The reference files are refreshed whether or not a gameweek is new:
+    # fixtures get rescheduled and average-manager scores only exist while the
+    # API is still serving them, so there is no sense in letting them go stale
+    # behind an early exit.
+    if not dry_run:
+        write_reference(season_label, bootstrap, fixtures, config)
+        write_provenance(season_label, config)
+
+    if not todo:
+        console.print("Nothing to ingest; reference files refreshed.")
+        raise typer.Exit(code=0)
+
+    # Prices first, because they are the one field the cheap endpoints do not
+    # carry. The weekly pre-deadline snapshot is the same figure and costs
+    # nothing, so it is preferred; only gameweeks with no snapshot need the
+    # per-player series, which is a request each.
+    prices: dict[int, dict[int, int]] = {}
+    sources: dict[int, str] = {}
+    for target in todo:
+        snapshot = load_snapshot(season_label, target, config)
+        if snapshot is not None:
+            prices[target] = dict(
+                zip(snapshot["player_id"].astype(int), snapshot["price"].astype(int))
+            )
+            sources[target] = "the pre-deadline snapshot"
+
+    uncovered = [g for g in todo if g not in prices]
+    if uncovered and with_prices:
+        console.print(
+            f"GW{uncovered} have no pre-deadline snapshot, so their prices come "
+            f"from the per-gameweek series (one request per player)…"
+        )
+        ids = [int(e["id"]) for e in bootstrap["elements"]]
+        with console.status("loading") as spinner:
+            for n, pid in enumerate(ids, start=1):
+                spinner.update(f"price history {n}/{len(ids)}")
+                try:
+                    history = client.element_summary(pid).get("history") or []
+                except FileNotFoundError:  # pragma: no cover - network shape
+                    continue
+                for row in history:
+                    gw_seen = int(row["round"])
+                    if gw_seen in uncovered:
+                        prices.setdefault(gw_seen, {})[pid] = int(row["value"])
+        for g in uncovered:
+            sources.setdefault(g, "the per-gameweek price series")
+    elif uncovered:
+        for g in uncovered:
+            sources[g] = "today's price (approximated)"
+
+    failures: list[tuple[int, str]] = []
+    for target in todo:
+        try:
+            frame, notes = ingest_gameweek(
+                target,
+                bootstrap=bootstrap,
+                fixtures=fixtures,
+                event_live=client.event_live(target),
+                prices=prices.get(target),
+            )
+            if not dry_run:
+                append_gameweek(frame, season_label, target, config)
+            console.print(
+                f"GW{target}: {len(frame)} rows, "
+                f"{frame['element'].nunique()} players, prices from "
+                f"{sources.get(target, 'today (approximated)')}"
+                + ("  [dim](dry run, not written)[/dim]" if dry_run else "")
+            )
+            for note in notes[:3]:
+                console.print(f"    [yellow]{note}[/yellow]")
+        except IngestFailed as exc:
+            failures.append((target, str(exc)))
+            console.print(f"[red]GW{target}: {exc}[/red]")
+
+    if not dry_run:
+        write_reference(season_label, bootstrap, fixtures, config)
+        path = write_provenance(season_label, config)
+        console.print(f"Wrote {path.parent}/ (teams, fixtures, {path.name})")
+
+    if failures:
+        console.print(
+            f"\n[red]{len(failures)} gameweek(s) failed to ingest: "
+            f"{[g for g, _ in failures]}[/red]"
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def transfers(
     team_id: int | None = typer.Option(
         None, "--team-id", help="your FPL entry id, from the URL of your team page"
@@ -724,7 +873,6 @@ def transfers(
     if squad is not None and bank is None and team_id is None:
         raise typer.BadParameter("--squad needs --bank (in millions)")
 
-    console.print("Fetching the current season (one request per player)…")
     client = FPLClient(config=config)
     bootstrap = client.bootstrap_static()
     rule_set = rules_from_bootstrap(bootstrap, config)
@@ -734,16 +882,34 @@ def transfers(
         console.print("[yellow]No upcoming gameweek to plan for.[/yellow]")
         raise typer.Exit(code=0)
 
-    with console.status("loading") as spinner:
-        data = load_live_season(
-            client=client,
-            config=config,
-            bootstrap=bootstrap,
-            fixtures=client.fixtures(),
-            progress=lambda done, total: spinner.update(
-                f"player histories {done}/{total}"
-            ),
+    # The ingested season is the same walk-forward history the backtest trains
+    # on, already on disk, so this costs no per-player requests. Falling back
+    # to `element-summary` only if a gameweek has not been ingested yet.
+    fixtures_payload = client.fixtures()
+    try:
+        data = season_with_upcoming(
+            current_season(bootstrap), bootstrap, fixtures_payload, target, config
         )
+        console.print(
+            f"Training on the ingested season: gameweeks "
+            f"{min(data.before(target)['gw'])}–{max(data.before(target)['gw'])}, "
+            f"all final before GW{target}'s deadline."
+        )
+    except IngestFailed as exc:
+        console.print(
+            f"[yellow]{exc}\nFalling back to the per-player history "
+            f"(one request per player).[/yellow]"
+        )
+        with console.status("loading") as spinner:
+            data = load_live_season(
+                client=client,
+                config=config,
+                bootstrap=bootstrap,
+                fixtures=fixtures_payload,
+                progress=lambda done, total: spinner.update(
+                    f"player histories {done}/{total}"
+                ),
+            )
 
     # --- what do we own, and what is it worth to us? ----------------------
     notes: list[str] = []
