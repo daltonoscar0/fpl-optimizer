@@ -323,6 +323,93 @@ def test_a_strategy_that_knows_who_played_is_marked_not_comparable(rules, config
     assert int(ep_row["window_points"]) > 0, "the figure is reported, not hidden"
 
 
+def _wide(rules):
+    """The synthetic season has four clubs; three per club cannot field fifteen."""
+    from dataclasses import replace
+
+    return replace(rules, team_limit=7), Config(
+        excluded_clubs=(),
+        horizon=2,
+        pool_per_position={"GKP": 8, "DEF": 12, "MID": 12, "FWD": 8},
+    )
+
+
+def test_the_naive_baseline_never_reads_the_expected_points_column(rules):
+    """Delete FPL's column outright and its season does not move."""
+    data = make_season(n_gws=12)
+    stripped = make_season(n_gws=12)
+    df = stripped.player_gws.copy()
+    df["ep"] = np.nan
+    stripped.player_gws = df
+    wide, config = _wide(rules)
+
+    with_ep = backtest(data, "naive", wide, config=config)
+    without = backtest(stripped, "naive", wide, config=config)
+
+    assert with_ep.total_points == without.total_points
+    assert [r.squad for r in with_ep.records] == [r.squad for r in without.records]
+
+
+def test_the_model_reads_it_only_through_a_fallback_it_can_trust(rules):
+    """So on archive data — where it refuses the fallback — it reads it not at all.
+
+    This is what makes the expected-points coverage threshold a fact about one
+    strategy rather than about a season. 2025-26 carries `xP` for 11 of 38
+    gameweeks, which disqualifies `ep` there and says nothing about the model:
+    the column is absent from the feature set, the candidate pool and the
+    scorer, and the one path that did reach it — the too-little-history
+    fallback — is refused on exactly the data that is contaminated.
+
+    Checked here by giving a season the archive's signature (non-appearances
+    rated zero) and then deleting the column: identical seasons either way.
+    """
+    hindsight = make_season(n_gws=12)
+    df = hindsight.player_gws.copy()
+    absent = pd.to_numeric(df["minutes"], errors="coerce").fillna(0) == 0
+    df.loc[absent, "ep"] = 0.0
+    df.loc[~absent, "ep"] = 4.0
+    hindsight.player_gws = df
+
+    stripped = make_season(n_gws=12)
+    df2 = stripped.player_gws.copy()
+    df2["ep"] = np.nan
+    stripped.player_gws = df2
+
+    wide, config = _wide(rules)
+    with_ep = backtest(
+        hindsight, "model", wide, config=config, cache=FeatureCache(hindsight)
+    )
+    without = backtest(
+        stripped, "model", wide, config=config, cache=FeatureCache(stripped)
+    )
+
+    assert with_ep.total_points == without.total_points
+    assert [r.squad for r in with_ep.records] == [r.squad for r in without.records]
+    assert [r.captain for r in with_ep.records] == [r.captain for r in without.records]
+
+
+def test_the_model_does_use_a_fallback_that_is_a_forecast(rules):
+    """The control for the test above: the fallback is not dead code.
+
+    Where the column behaves like a forecast, the model leans on it for its
+    first gameweeks — and deleting it then *does* change the season.
+    """
+    data = make_season(n_gws=12)
+    stripped = make_season(n_gws=12)
+    df = stripped.player_gws.copy()
+    df["ep"] = np.nan
+    stripped.player_gws = df
+    wide, config = _wide(rules)
+
+    with_ep = backtest(data, "model", wide, config=config, cache=FeatureCache(data))
+    without = backtest(
+        stripped, "model", wide, config=config, cache=FeatureCache(stripped)
+    )
+
+    assert with_ep.fallback_gws, "the forecast fallback should have been used"
+    assert with_ep.total_points != without.total_points
+
+
 def test_the_frame_and_summary_describe_the_same_season(season, rules, config):
     result = backtest(season, "naive", rules, config=config)
     frame = result.frame()

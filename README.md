@@ -160,19 +160,86 @@ between them is attributable to the projections and to nothing else.
 ### Why `ep` is not in the table
 
 FPL's own published expected points were meant to be the honest middle
-baseline, and the omission line under the table is the reason they are not. A
-strategy reading the archive's `xP` already knows who played, so its total is
-not a forecasting result — it is a measurement of how much playing time is
-worth, which is most of an FPL score.
+baseline: a number someone else computed, with nothing fitted. On the archive
+it is not one. The column already knows who played.
 
-The giveaway was the size of it. The first backtest that ran came out at 88
-points a gameweek, and no human manager scores 88 a gameweek over a season;
-the record across ten million players is nearer 71. A number that good from a
-baseline that simple is a reason to go and check the column, not to publish the
-finding. See **Known gaps** for what the check found.
+The giveaway was the size of it — the first backtest came out at 88 points a
+gameweek, and nobody scores 88 a gameweek over a season; the record across ten
+million managers is nearer 71. A score that good from a baseline that simple is
+a reason to check the column rather than publish the finding. Checking it:
 
-It is still run, and `results/` keeps its full per-gameweek records, so the
-claim can be checked rather than taken on trust.
+| `xP` for player-gameweeks where… | mean | rated exactly 0.0 |
+|---|---|---|
+| the player played 0 minutes | 0.15 | **66%** |
+| the player played 60+ minutes | 3.12 | 1.3% |
+
+*(2023-24; 2024-25 and 2025-26 measure 64–65% the same way.)*
+
+A pre-deadline forecast cannot do that. FPL quotes an `ep_next` for every
+registered player before every deadline, including the nailed starter who turns
+out to be a surprise omission — so a forecast's ratings for players who went on
+to play nothing should look much like its ratings for everyone else. Two thirds
+of them being *exactly* zero means the value was written down after the team
+sheets were known.
+
+That matters more than it might sound, because whether a player starts is most
+of the variance in an FPL score. A strategy reading this column is not
+forecasting playing time, it is being told it. So its total measures what the
+information is worth, not what the strategy is — and it cannot be set against
+strategies that had to guess.
+
+Three consequences, all of them in the code rather than only here:
+
+- `ep_looks_like_hindsight` measures the share, `fpl data` prints it in the
+  season notes, and a backtest result carries `comparable=False` with the
+  reason, so `fpl table` leaves it out of the comparison and says why.
+- The model used to borrow this column for its first three gameweeks, when it
+  has too little history to fit. It no longer will where the column is
+  contaminated — that alone was worth about 470 points of inflation in 2023-24.
+  It reports no view instead and starts in GW5.
+- `xP` is also quoted per *gameweek*, not per fixture: in all 1,278
+  double-gameweek player-gameweeks across two seasons, both fixture rows carry
+  the identical value. Summing them, as this project did at first, invents
+  expected points FPL never published.
+
+It is still run, and `results/` keeps its full per-gameweek records, so all of
+the above can be checked rather than taken on trust. On live data none of it
+applies: `ep_next` really is published in advance, and the model will use it.
+
+## Live record
+
+A backtest can be re-run tomorrow with a better answer. This cannot, which is
+why it is here — and why it is governed by one rule:
+
+> A gameweek is scored only from a recommendation recorded **before** its
+> deadline.
+
+`fpl track` does both halves of that. Before a deadline it writes the squad the
+optimizer picked, with the timestamp it was picked at and the deadline it was
+picked for. After the gameweek it scores that recorded squad against realized
+results, next to the average of every team entered worldwide — the one
+benchmark the live API publishes and the archive does not.
+
+Nothing else can produce a row. There is no path that scores a gameweek nobody
+called in advance, a recommendation written after the deadline, or a
+recommendation quietly rewritten once the results were known. So the table
+starts empty and grows a row a week, which is slower and worth more than a
+table that arrives complete.
+
+| GW | Recommended XI scored | Average manager | Difference |
+|---|---|---|---|
+| — | *no gameweek called in advance yet* | — | — |
+
+```sh
+fpl track                 # score what is on record, then call the next gameweek
+fpl track --dry-run       # see the recommendation without recording it
+```
+
+Run it once a week before the deadline. The first run costs one request per
+player (one a second, cached afterwards) and scores nothing, because nothing is
+on record yet. The per-gameweek rows live in `results/live/`, one JSON
+recommendation per gameweek alongside the scored CSV, so each row can be traced
+back to the squad and the timestamp it came from.
 
 ## Known gaps
 

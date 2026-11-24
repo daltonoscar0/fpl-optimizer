@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 from fpl_optimizer import cli
 from fpl_optimizer.archive import available_seasons
+from fpl_optimizer.config import Config
 
 from .fixtures import ARCHIVE_SEASON, load_archive_fixture
 
@@ -251,3 +252,115 @@ def test_table_without_a_backtest_says_what_to_run(tmp_path):
     result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
     assert result.exit_code != 0
     assert "fpl backtest" in result.stderr
+
+
+# --- track ------------------------------------------------------------------
+
+
+@pytest.fixture
+def live(monkeypatch, tmp_path):
+    """A fake current season: the hand-built one, with GW3 still to come.
+
+    `track` reaches the API for the bootstrap payload, the fixture list and a
+    history per player. All three are stubbed, so the test exercises the
+    command's logic — record, score, refuse — without a request.
+    """
+    from fpl_optimizer.rules import archive_season_rules
+    from .fixtures.handbuilt import hand_built_season
+
+    data = hand_built_season()
+    events = data.events.copy()
+    events.loc[events["gw"] == 3, "finished"] = False
+    data.events = events
+    data.source = "live"
+
+    class StubClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def bootstrap_static(self):
+            return {}
+
+        def fixtures(self):
+            return []
+
+    monkeypatch.setattr(cli, "FPLClient", StubClient)
+    monkeypatch.setattr(cli, "load_live_season", lambda *a, **k: data)
+    monkeypatch.setattr(
+        cli, "rules_from_bootstrap", lambda *a, **k: archive_season_rules("2024-25")
+    )
+    monkeypatch.setattr(cli, "next_gw", lambda *a, **k: 3)
+    monkeypatch.setattr(
+        cli, "Config", lambda *a, **k: Config(excluded_clubs=(), horizon=2, results_dir=tmp_path)
+    )
+    return data, tmp_path
+
+
+def test_track_records_the_upcoming_gameweek(live):
+    _, results_dir = live
+    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+
+    assert result.exit_code == 0, result.output
+    written = list((results_dir / "live").glob("*-gw03-ep.json"))
+    assert len(written) == 1
+    rec = json.loads(written[0].read_text())
+    assert rec["gw"] == 3
+    assert len(rec["squad"]) == 15
+    assert "Recorded GW3" in result.stdout
+
+
+def test_track_scores_nothing_on_its_first_run(live):
+    """There is nothing on record yet, and it says so instead of inventing one."""
+    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+
+    assert result.exit_code == 0
+    assert "Nothing to score yet" in result.stdout
+    assert "no gameweek called in advance yet" in result.stdout
+
+
+def test_track_will_not_overwrite_a_recommendation_already_on_record(live):
+    first = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    assert "Recorded GW3" in first.stdout
+
+    second = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    assert second.exit_code == 0
+    assert "already on record" in second.stdout
+
+
+def test_track_dry_run_decides_but_writes_nothing(live):
+    _, results_dir = live
+    result = runner.invoke(cli.app, ["track", "--strategy", "ep", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "GW3 recommendation" in result.stdout
+    assert not list((results_dir / "live").glob("*.json"))
+
+
+def test_track_scores_a_gameweek_that_was_called_in_advance(live):
+    """Record GW2 in advance, then let `track` find it finished and score it."""
+    from fpl_optimizer.track import record, recommend
+    from fpl_optimizer.rules import archive_season_rules
+
+    data, results_dir = live
+    config = Config(excluded_clubs=(), horizon=2, results_dir=results_dir)
+    rec = recommend(
+        data,
+        2,
+        "ep",
+        archive_season_rules("2024-25"),
+        config=config,
+        now="2024-09-01T09:00:00+00:00",
+    )
+    record(rec, config)
+
+    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    assert result.exit_code == 0, result.output
+    assert "recommended XI scored" in result.stdout
+    assert "average manager 70" in result.stdout
+    assert (results_dir / "live" / "2024-25.csv").exists()
+
+
+def test_track_rejects_an_unknown_strategy(live):
+    result = runner.invoke(cli.app, ["track", "--strategy", "vibes"])
+    assert result.exit_code != 0
+    assert "unknown strategy" in result.stderr
