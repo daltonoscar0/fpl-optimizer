@@ -572,7 +572,10 @@ def real_team(monkeypatch, tmp_path):
         cli,
         "Config",
         lambda *a, **k: Config(
-            excluded_clubs=(), horizon=2, results_dir=tmp_path
+            excluded_clubs=(),
+            horizon=2,
+            results_dir=tmp_path,
+            data_dir=tmp_path / "data",
         ),
     )
     return SimpleNamespace(data=data, payloads=payloads, bootstrap=bootstrap)
@@ -582,19 +585,24 @@ def test_transfers_reads_the_team_and_recommends(real_team):
     result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
 
     assert result.exit_code == 0, result.output
-    assert "Hand Built FC" in plain(result.stdout)
-    assert "is it worth it?" in plain(result.stdout)
-    assert "hold (roll the transfer)" in plain(result.stdout)
+    out = plain(result.stdout)
+    assert "Hand Built FC" in out
+    assert "is a hit worth it?" in out
+    assert "hold (roll the transfer)" in out
+    assert "every plan, solved on its own" in out
     assert "starting XI" in plain(result.stdout)
     assert "bench, in order" in plain(result.stdout)
 
 
-def test_transfers_reports_the_gain_against_rolling(real_team):
+def test_transfers_reports_every_plan_against_holding(real_team):
     result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+    out = plain(result.stdout)
 
-    assert "Expected gain over the horizon versus rolling:" in plain(result.stdout)
-    # Holding is the baseline, so its row is always zero against itself.
-    assert "+0.00" in plain(result.stdout)
+    assert "vs holding" in out
+    assert "vs one fewer" in out
+    # Holding is the baseline, so its row is zero against itself.
+    assert "+0.00" in out
+    assert "whole plans, not a menu" in out
 
 
 def test_transfers_says_when_no_hit_is_needed(real_team):
@@ -703,16 +711,67 @@ def test_transfers_rejects_an_unknown_strategy(real_team):
     assert "unknown strategy" in plain(result.stderr)
 
 
-def test_transfers_prices_each_move_separately(real_team):
-    """A total gain says nothing about whether the fifth move is worth making."""
+def test_transfers_solves_each_plan_size_on_its_own(real_team):
+    """A total gain says nothing about whether the fifth move is worth making.
+
+    And the four-transfer plan is solved from scratch rather than derived from
+    the five, because the sets differ.
+    """
     result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
 
     assert result.exit_code == 0, result.output
     out = plain(result.stdout)
-    if "recommended transfers" in out:
-        assert "margin behind each move" in out
-        # One row per move, numbered.
-        assert "#1" in out
+    assert "every plan, solved on its own" in out
+    assert "vs one fewer" in out
+
+
+def test_transfers_can_be_asked_for_an_exact_count(real_team):
+    """`--transfers N` is how a plan size is compared, not by editing another."""
+    result = runner.invoke(
+        cli.app, ["transfers", "--team-id", "4242", "-s", "ep", "--transfers", "1"]
+    )
+
+    assert result.exit_code == 0, result.output
+    out = plain(result.stdout)
+    assert "exactly 1 transfer(s), as asked" in out
+    assert "the 1-transfer plan" in out
+
+
+def test_transfers_never_advises_dropping_a_move_from_a_plan(real_team):
+    """The advice that was wrong before: "make four, treat the fifth as optional".
+
+    With non-nested plans that is incoherent, so the wording compares plans and
+    says explicitly that they are not a menu.
+    """
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+    out = plain(result.stdout)
+
+    assert "whole plans, not a menu" in out
+    assert "enter it as it stands" in out
+    for forbidden in ("treat the fifth", "drop a move", "optional move"):
+        assert forbidden not in out
+
+
+def test_the_displayed_transfers_are_like_for_like(real_team):
+    """FPL only accepts a position-for-position swap, so the table must pair them.
+
+    Zipping two sorted lists produced "a midfielder out, a defender in", which
+    the game refuses and a manager cannot enter.
+    """
+    from fpl_optimizer.optimize import pair_transfers
+    from fpl_optimizer.score import positions_from
+
+    data = real_team.data
+    positions = positions_from(data)
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+    out = plain(result.stdout)
+
+    # Every rendered pair names the same position on both sides.
+    import re
+
+    rows = re.findall(r"(\w[\w .'-]*) \((GKP|DEF|MID|FWD)\)\s+│\s+(\w[\w .'-]*) \((GKP|DEF|MID|FWD)\)", out)
+    for _, out_pos, _, in_pos in rows:
+        assert out_pos == in_pos, f"{out_pos} out but {in_pos} in"
 
 
 def test_transfers_flags_a_margin_under_a_point_as_low_confidence(

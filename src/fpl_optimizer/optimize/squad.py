@@ -39,6 +39,7 @@ import contextlib
 import logging
 import os
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -214,6 +215,7 @@ def optimize_squad(
     budget: int | None = None,
     max_hits: int | None = None,
     max_transfers: int | None = None,
+    min_transfers: int | None = None,
     must_include: tuple[int, ...] = (),
     must_exclude: tuple[int, ...] = (),
     allow_excluded_clubs: bool = False,
@@ -237,6 +239,11 @@ def optimize_squad(
         Cap on transfers of any kind, free ones included. Solving for one, then
         two, then three and differencing the objectives is how the marginal
         value of each additional transfer is measured.
+    min_transfers:
+        Floor on the same count. Setting both to ``n`` asks for the best plan
+        of exactly that size, which is the only honest way to compare plan
+        sizes: the best four-transfer plan is not the best five with a move
+        removed.
     max_hits:
         Cap on hit-taking transfers. ``0`` forbids them outright, which is how
         "what do my free transfers alone buy" is asked; ``None`` leaves the
@@ -366,6 +373,10 @@ def optimize_squad(
             problem += (
                 pulp.lpSum(in_squad[i] for i in incoming) <= int(max_transfers)
             )
+        if min_transfers is not None:
+            problem += (
+                pulp.lpSum(in_squad[i] for i in incoming) >= int(min_transfers)
+            )
     else:
         problem += (
             pulp.lpSum(price[i] * in_squad[i] for i in ids)
@@ -423,6 +434,60 @@ def optimize_squad(
         solver_status=label,
         detail={i: xpts[i] for i in chosen},
     )
+
+
+def pair_transfers(
+    transfers_out: Sequence[int],
+    transfers_in: Sequence[int],
+    positions: Mapping[int, str],
+    prices: Mapping[int, int] | None = None,
+) -> list[tuple[int, int]]:
+    """Pair players leaving with players arriving, position by position.
+
+    An FPL transfer is like-for-like: a midfielder out and a midfielder in. The
+    squad quotas are fixed per position, so any plan sells exactly as many of a
+    position as it buys and a valid pairing always exists — but it has to be
+    *constructed*, not assumed. Zipping two sorted lists produced
+    "a midfielder out, a defender in", which the game would refuse and a
+    manager could not enter.
+
+    Within a position the costliest departure is matched to the costliest
+    arrival, so each row's money roughly balances. FPL only requires the total
+    to balance, but a row that reads sensibly is easier to trust.
+
+    Raises
+    ------
+    ValueError
+        If the positions do not match up, which would mean the plan itself is
+        not enterable rather than merely mis-displayed.
+    """
+    out_by_position: dict[str, list[int]] = {}
+    in_by_position: dict[str, list[int]] = {}
+    for pid in transfers_out:
+        out_by_position.setdefault(positions[pid], []).append(pid)
+    for pid in transfers_in:
+        in_by_position.setdefault(positions[pid], []).append(pid)
+
+    if {k: len(v) for k, v in out_by_position.items()} != {
+        k: len(v) for k, v in in_by_position.items()
+    }:
+        raise ValueError(
+            f"a transfer plan must be like-for-like, but "
+            f"{ {k: len(v) for k, v in out_by_position.items()} } leave and "
+            f"{ {k: len(v) for k, v in in_by_position.items()} } arrive"
+        )
+
+    cost = prices or {}
+    pairs: list[tuple[int, int]] = []
+    for position in POSITIONS:
+        leaving = sorted(
+            out_by_position.get(position, []), key=lambda p: -cost.get(p, 0)
+        )
+        arriving = sorted(
+            in_by_position.get(position, []), key=lambda p: -cost.get(p, 0)
+        )
+        pairs.extend(zip(leaving, arriving))
+    return pairs
 
 
 def pick_squad(

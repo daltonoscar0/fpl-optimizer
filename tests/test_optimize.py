@@ -19,6 +19,7 @@ from fpl_optimizer.optimize import (
     horizon_predictions,
     latest_known,
     optimize_squad,
+    pair_transfers,
     pick_squad,
     prune_pool,
     validate_candidates,
@@ -519,3 +520,61 @@ def test_capping_transfers_at_zero_is_the_same_as_holding(rules, config):
     )
     assert held.n_transfers == 0
     assert set(held.squad.players) == set(current)
+
+
+# --- pairing transfers for entry into the game ------------------------------
+
+
+def test_transfers_are_paired_position_for_position(rules, config):
+    """FPL accepts a midfielder for a midfielder, not a midfielder for a defender."""
+    rows = _spread(xpts=1.0) + [
+        (60, "DEF", "H", 40, 9.0),
+        (61, "MID", "H", 40, 9.0),
+    ]
+    current = tuple(row[0] for row in _spread())
+    frame = _frame(rows)
+    plan = optimize_squad(
+        frame, rules, config=config, current=current, free_transfers=5, bank=0
+    )
+    positions = dict(zip(frame["player_id"], frame["position"]))
+
+    pairs = pair_transfers(
+        plan.transfers_out, plan.transfers_in, positions,
+        dict(zip(frame["player_id"], frame["price"])),
+    )
+    assert len(pairs) == plan.n_transfers
+    for out_id, in_id in pairs:
+        assert positions[out_id] == positions[in_id]
+
+
+def test_pairing_puts_the_costliest_together(rules):
+    """So each row's money roughly balances and reads as enterable."""
+    positions = {1: "MID", 2: "MID", 11: "MID", 12: "MID"}
+    prices = {1: 50, 2: 90, 11: 95, 12: 45}
+
+    pairs = pair_transfers([1, 2], [11, 12], positions, prices)
+    assert pairs == [(2, 11), (1, 12)]
+
+
+def test_pairing_refuses_a_plan_that_is_not_like_for_like():
+    """Which would mean the plan itself is unenterable, not just mis-shown."""
+    with pytest.raises(ValueError, match="like-for-like"):
+        pair_transfers([1], [2], {1: "MID", 2: "FWD"})
+
+
+def test_an_exact_transfer_count_is_solved_not_trimmed(rules, config):
+    """The best four is not the best five with a move removed.
+
+    Setting both bounds asks the program for the best plan *of that size*,
+    which is the only sound way to compare sizes.
+    """
+    rows = _spread(xpts=1.0) + [
+        (60 + i, "FWD", "H", 40, 9.0 - i * 3) for i in range(3)
+    ]
+    current = tuple(row[0] for row in _spread())
+
+    exact_two = optimize_squad(
+        _frame(rows), rules, config=config, current=current,
+        free_transfers=5, bank=0, max_transfers=2, min_transfers=2,
+    )
+    assert exact_two.n_transfers == 2
