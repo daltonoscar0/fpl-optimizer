@@ -13,6 +13,10 @@ import pandas as pd
 import pytest
 
 from fpl_optimizer.archive import normalize_archive_season
+from fpl_optimizer.projections.baselines import (
+    EP_HINDSIGHT_THRESHOLD,
+    ep_looks_like_hindsight,
+)
 from fpl_optimizer.schema import FIXTURE_COLUMNS, PLAYER_GW_COLUMNS, validate_player_gws
 
 from .fixtures import ARCHIVE_GWS, archive_paths, load_archive_fixture
@@ -130,3 +134,48 @@ def test_fixtures_frame_is_canonical(season):
     known = set(season.clubs["club"])
     assert set(season.fixtures["home_club"].dropna()) <= known
     assert set(season.fixtures["away_club"].dropna()) <= known
+
+
+# --- is the published forecast actually a forecast? -------------------------
+
+
+def test_the_expected_points_column_is_flagged_as_knowing_who_played(season):
+    """``xP`` rates non-appearances zero, which a forecast cannot do.
+
+    FPL quotes an ``ep_next`` for every registered player before the deadline,
+    including the nailed starter who turns out to be a surprise omission. A
+    column that rates two thirds of non-appearances at exactly 0.0 has been
+    recorded after the fact.
+    """
+    share, mean_rating = ep_looks_like_hindsight(season)
+
+    assert share > EP_HINDSIGHT_THRESHOLD
+    assert mean_rating < 1.0
+    assert any("knows who played" in note for note in season.notes)
+
+
+def test_the_flag_measures_absences_not_everyone(season):
+    """Players who did turn out are rated normally; that is the contrast."""
+    played = season.player_gws[
+        pd.to_numeric(season.player_gws["minutes"], errors="coerce").fillna(0) >= 60
+    ]["ep"]
+    played = pd.to_numeric(played, errors="coerce").dropna()
+    absent_share, _ = ep_looks_like_hindsight(season)
+
+    assert float((played == 0).mean()) < 0.05
+    assert absent_share > 0.5
+    assert float(played.mean()) > 2.0
+
+
+def test_a_genuine_forecast_is_not_flagged(raw):
+    """The control: rate absences like everyone else and the flag goes quiet."""
+    merged, teams, fixtures = raw
+    honest = merged.copy()
+    # A forecast that cannot see minutes: every player rated the same 2.5.
+    honest["xP"] = 2.5
+    data = normalize_archive_season("2024-25", honest, teams, fixtures)
+
+    share, mean_rating = ep_looks_like_hindsight(data)
+    assert share == 0.0
+    assert mean_rating == pytest.approx(2.5)
+    assert not any("knows who played" in note for note in data.notes)

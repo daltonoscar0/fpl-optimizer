@@ -47,7 +47,11 @@ import pandas as pd
 from ..features import FEATURE_COLUMNS, FeatureCache
 from ..schema import SeasonData
 from .base import aggregate_to_gw, empty_predictions
-from .baselines import EPProjection
+from .baselines import (
+    EP_HINDSIGHT_THRESHOLD,
+    EPProjection,
+    ep_looks_like_hindsight,
+)
 
 log = logging.getLogger(__name__)
 
@@ -166,8 +170,10 @@ class JaxPointsModel:
     ----------
     min_train_gws:
         Gameweeks of history required before the model's own predictions are
-        used. Below this it defers to FPL's published expected points, which is
-        reported rather than hidden — see :attr:`fallback_gws`.
+        used. Below this it defers to FPL's published expected points — but only
+        where that column is a genuine forecast, which on the archive it is not;
+        see :meth:`_fallback_is_a_forecast`. Either way the hand-off is reported
+        rather than hidden, in :attr:`fallback_gws` and :attr:`no_view_gws`.
     """
 
     name: str = "model"
@@ -187,6 +193,10 @@ class JaxPointsModel:
     #: Gameweeks where the model had too little history and deferred to the
     #: baseline. Printed by the backtester so the hand-off is visible.
     fallback_gws: list[int] = field(default_factory=list)
+    #: Gameweeks where it had too little history *and* the baseline could not be
+    #: trusted, so it reported no view. See :meth:`_fallback_is_a_forecast`.
+    no_view_gws: list[int] = field(default_factory=list)
+    _fallback_trusted: bool | None = field(default=None, repr=False)
     fit_report: dict[str, float] = field(default_factory=dict)
 
     def attach(self, cache: FeatureCache) -> None:
@@ -266,8 +276,37 @@ class JaxPointsModel:
 
     # --- prediction ---------------------------------------------------------
 
+    def _fallback_is_a_forecast(self, data: SeasonData) -> bool:
+        """Whether deferring to FPL's expected points would import hindsight.
+
+        Live, ``ep_next`` is a genuine pre-deadline forecast and deferring to it
+        is the right thing to do with too little history. The archive's ``xP``
+        is the same field recorded after the fact — it rates two thirds of
+        non-appearances at exactly zero — so deferring to it there would hand
+        the model an oracle on playing time for its first few gameweeks and
+        quietly flatter its season total.
+
+        Where that is the case the model reports no view at all, and the
+        backtester holds the squad rather than acting on a number neither the
+        model nor FPL actually produced in advance.
+        """
+        if self._fallback_trusted is None:
+            share, _ = ep_looks_like_hindsight(data)
+            self._fallback_trusted = share <= EP_HINDSIGHT_THRESHOLD
+            if not self._fallback_trusted:
+                log.info(
+                    "expected-points column rates %.0f%% of non-appearances at "
+                    "zero: not deferring to it",
+                    share * 100,
+                )
+        return self._fallback_trusted
+
     def predict(self, data: SeasonData, gw: int) -> pd.DataFrame:
         if self.params is None:
+            if not self._fallback_is_a_forecast(data):
+                if gw not in self.no_view_gws:
+                    self.no_view_gws.append(gw)
+                return empty_predictions()
             if gw not in self.fallback_gws:
                 self.fallback_gws.append(gw)
             return self._fallback.predict(data, gw)

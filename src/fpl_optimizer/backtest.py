@@ -345,12 +345,20 @@ def backtest(
         if progress is not None:
             progress(n, len(gameweeks))
 
-    if isinstance(projection, JaxPointsModel) and projection.fallback_gws:
-        result.notes.append(
-            f"the model deferred to FPL's expected points for "
-            f"{len(projection.fallback_gws)} gameweeks with too little history: "
-            f"{sorted(projection.fallback_gws)}"
-        )
+    if isinstance(projection, JaxPointsModel):
+        if projection.fallback_gws:
+            result.notes.append(
+                f"the model deferred to FPL's expected points for "
+                f"{len(projection.fallback_gws)} gameweeks with too little "
+                f"history: {sorted(projection.fallback_gws)}"
+            )
+        if projection.no_view_gws:
+            result.notes.append(
+                f"the model had too little history for "
+                f"{len(projection.no_view_gws)} gameweeks and would not defer to "
+                f"this season's expected-points column, which knows who played: "
+                f"{sorted(projection.no_view_gws)}"
+            )
     result.notes.extend(data.notes)
     return result
 

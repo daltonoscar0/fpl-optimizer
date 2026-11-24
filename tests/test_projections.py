@@ -297,6 +297,34 @@ def test_naive_rates_a_player_with_no_history_at_zero(season):
 # --- the model --------------------------------------------------------------
 
 
+def test_the_model_will_not_defer_to_a_baseline_that_knows_who_played():
+    """Deferring to the archive's xP would hand the model an oracle.
+
+    With too little history the model normally falls back to FPL's published
+    figure, which live is a genuine pre-deadline forecast. Where the column has
+    been recorded after the fact — two thirds of non-appearances rated exactly
+    zero — deferring would import hindsight into the model's own season total
+    for its first few gameweeks. It reports no view instead.
+    """
+    from .fixtures.handbuilt import hand_built_season
+
+    data = hand_built_season()
+    df = data.player_gws.copy()
+    # Rate every non-appearance zero, as the archive does.
+    absent = pd.to_numeric(df["minutes"], errors="coerce").fillna(0) == 0
+    df.loc[absent, "ep"] = 0.0
+    df.loc[~absent, "ep"] = 4.0
+    data.player_gws = df
+
+    model = _fast_model(min_train_gws=3)
+    model.fit(data, 2)
+    assert model.params is None
+
+    assert model.predict(data, 2).empty
+    assert model.no_view_gws == [2]
+    assert model.fallback_gws == []
+
+
 def test_model_defers_to_the_baseline_before_it_has_history(season, cache):
     model = _fast_model(cache, min_train_gws=3)
     model.fit(season, 2)
