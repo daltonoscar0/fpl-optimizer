@@ -1,0 +1,110 @@
+[
+  {
+    "id": 101,
+    "event": 1,
+    "team_h": 1,
+    "team_a": 2,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-01T14:00:00Z",
+    "finished": true,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  },
+  {
+    "id": 111,
+    "event": 1,
+    "team_h": 3,
+    "team_a": 4,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-01T14:00:00Z",
+    "finished": true,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  },
+  {
+    "id": 121,
+    "event": 1,
+    "team_h": 5,
+    "team_a": 6,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-01T14:00:00Z",
+    "finished": true,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  },
+  {
+    "id": 102,
+    "event": 2,
+    "team_h": 2,
+    "team_a": 1,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-02T14:00:00Z",
+    "finished": true,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  },
+  {
+    "id": 103,
+    "event": 2,
+    "team_h": 1,
+    "team_a": 2,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-02T14:00:00Z",
+    "finished": true,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  },
+  {
+    "id": 112,
+    "event": 2,
+    "team_h": 4,
+    "team_a": 3,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-02T14:00:00Z",
+    "finished": true,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  },
+  {
+    "id": 122,
+    "event": 2,
+    "team_h": 6,
+    "team_a": 5,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-02T14:00:00Z",
+    "finished": true,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  },
+  {
+    "id": 104,
+    "event": 3,
+    "team_h": 2,
+    "team_a": 1,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-03T14:00:00Z",
+    "finished": false,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  },
+  {
+    "id": 113,
+    "event": 3,
+    "team_h": 3,
+    "team_a": 4,
+    "team_h_score": 1,
+    "team_a_score": 1,
+    "kickoff_time": "2024-09-03T14:00:00Z",
+    "finished": false,
+    "team_h_difficulty": 3,
+    "team_a_difficulty": 3
+  }
+]
