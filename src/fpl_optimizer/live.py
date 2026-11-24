@@ -117,6 +117,16 @@ def _events_frame(bootstrap: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("gw").reset_index(drop=True)
 
 
+def events_from_bootstrap(bootstrap: dict[str, Any]) -> pd.DataFrame:
+    """Per-gameweek metadata — deadlines, finished flags, average scores.
+
+    Exposed separately because deciding whether there is anything to do needs
+    only this, which is one request, rather than a history for every player in
+    the game, which is one request each.
+    """
+    return _events_frame(bootstrap)
+
+
 def _fixtures_frame(
     fixtures: list[dict[str, Any]], season: str, id_to_name: dict[int, str]
 ) -> pd.DataFrame:

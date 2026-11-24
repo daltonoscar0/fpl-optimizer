@@ -131,6 +131,116 @@ def _parse(stamp: str) -> datetime:
     return parsed
 
 
+@dataclass
+class TrackPlan:
+    """What a run of ``fpl track`` should do, decided before fetching anything.
+
+    Deciding is cheap — it needs the gameweek deadlines, which arrive in one
+    request, plus the records already on disk. Acting is expensive: recording
+    needs a history for every player in the game, one request each. Separating
+    them is what makes running this every few hours reasonable rather than
+    thousands of requests a day to discover there is nothing to do.
+    """
+
+    season: str
+    next_gw: int | None
+    next_deadline: str | None
+    #: The gameweek to record for, or ``None`` if there is nothing to record.
+    record_gw: int | None
+    #: Finished gameweeks with a recommendation on record and no score yet.
+    score_gws: list[int]
+    #: Gameweeks whose deadline passed with nothing on record, after tracking
+    #: began. Each one is a permanent hole in the record.
+    missed_gws: list[int]
+    #: Why there is nothing to record, when there is nothing to record.
+    reason: str = ""
+
+    @property
+    def nothing_to_do(self) -> bool:
+        return self.record_gw is None and not self.score_gws
+
+    @property
+    def needs_full_season(self) -> bool:
+        """Recording projects every player, so it needs every player's history."""
+        return self.record_gw is not None
+
+
+def plan_track(
+    season: str,
+    events: pd.DataFrame,
+    *,
+    recorded_gws: set[int],
+    scored_gws: set[int],
+    next_gw: int | None,
+    now: datetime | str,
+    strategy: str = "model",
+) -> TrackPlan:
+    """Decide what to do, from deadlines and what is already on record.
+
+    Pure: no network, no disk. Every branch the scheduled workflow can take is
+    therefore testable without either.
+    """
+    moment = _parse(now) if isinstance(now, str) else now
+    deadlines: dict[int, str | None] = {}
+    for row in events.to_dict("records"):
+        value = row.get("deadline_time")
+        deadlines[int(row["gw"])] = None if pd.isna(value) else str(value)
+    finished = {
+        int(row["gw"]): bool(row.get("finished"))
+        for row in events.to_dict("records")
+    }
+
+    def passed(gw: int) -> bool:
+        stamp = deadlines.get(gw)
+        return stamp is not None and _parse(stamp) <= moment
+
+    # --- what to record ----------------------------------------------------
+    record_gw: int | None = None
+    reason = ""
+    next_deadline = deadlines.get(next_gw) if next_gw is not None else None
+    if next_gw is None:
+        reason = "no upcoming gameweek"
+    elif next_gw in recorded_gws:
+        reason = f"GW{next_gw} is already on record"
+    elif next_deadline is None:
+        reason = f"GW{next_gw} has no published deadline"
+    elif passed(next_gw):
+        # The record is only worth anything if it predates the deadline, so a
+        # late run records nothing rather than something worthless.
+        reason = f"GW{next_gw}'s deadline has passed"
+    else:
+        record_gw = next_gw
+
+    # --- what to score -----------------------------------------------------
+    score_gws = sorted(
+        gw
+        for gw in recorded_gws
+        if finished.get(gw) and gw not in scored_gws
+    )
+
+    # --- what was missed ---------------------------------------------------
+    # Only after tracking began: the gameweeks played before the first
+    # recommendation was ever written are not missed, they are prehistory.
+    missed_gws: list[int] = []
+    if recorded_gws:
+        began = min(recorded_gws)
+        missed_gws = sorted(
+            gw
+            for gw in deadlines
+            if gw > began and passed(gw) and gw not in recorded_gws
+        )
+
+    return TrackPlan(
+        season=season,
+        next_gw=next_gw,
+        next_deadline=next_deadline,
+        record_gw=record_gw,
+        score_gws=score_gws,
+        missed_gws=missed_gws,
+        reason=reason,
+    )
+
+
 def live_dir(config: Config | None = None) -> Path:
     directory = (config or Config()).results_dir / LIVE_DIR
     directory.mkdir(parents=True, exist_ok=True)
@@ -230,16 +340,30 @@ def recommend(
 
 
 def record(rec: Recommendation, config: Config | None = None) -> Path:
-    """Write a recommendation to disk. Refuses to overwrite an earlier one.
+    """Write a recommendation to disk, once, and only ahead of its deadline.
 
-    Overwriting would destroy the only thing that makes the record worth
-    anything: that it was written before the result was known.
+    Two refusals, and they are the whole contract of the live record:
+
+    *Already on record* — overwriting would destroy the only thing that makes
+    the file worth anything, that it was written before the result was known.
+    This is also what makes the command idempotent: run it six times a day and
+    at most one file per gameweek is ever written.
+
+    *Not ahead of the deadline* — a recommendation written at or after kick-off
+    is not a prediction, and storing one would put a row in the table that
+    cannot be distinguished later from a real one.
     """
     path = recommendation_path(rec.season, rec.gw, rec.strategy, config)
     if path.exists():
         raise FileExistsError(
             f"a recommendation for GW{rec.gw} is already on record at {path}; "
             f"it will not be overwritten"
+        )
+    if not rec.in_advance:
+        raise NotRecordedInAdvance(
+            f"the GW{rec.gw} recommendation was made at {rec.recorded_at}, which "
+            f"is not before its deadline ({rec.deadline}): it will not be "
+            f"written, because a record that late is worth nothing"
         )
     path.write_text(json.dumps(asdict(rec), indent=2) + "\n")
     log.info("recorded GW%d recommendation to %s", rec.gw, path)

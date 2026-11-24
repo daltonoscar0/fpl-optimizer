@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -43,7 +44,7 @@ from .backtest import BacktestResult, compare
 from .backtest import backtest as run_backtest
 from .config import Config
 from .features import FeatureCache
-from .live import load_live_season, next_gw
+from .live import current_season, events_from_bootstrap, load_live_season, next_gw
 from .optimize import InfeasibleSquad
 from .projections import STRATEGIES
 from .projections.baselines import EP_COVERAGE_THRESHOLD, ep_coverage
@@ -53,9 +54,9 @@ from .score import positions_from
 from .track import (
     NotRecordedInAdvance,
     append_tracked,
-    is_finished,
     load_recommendation,
     markdown_table,
+    plan_track,
     record,
     recommend,
     score_recorded,
@@ -420,24 +421,21 @@ def track(
         None, "--gw", help="gameweek to record for; default is the next one"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="decide, write nothing"),
+    status_file: Path | None = typer.Option(
+        None, "--status-file", help="write a JSON summary here, for automation"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Record this gameweek's recommendation, and score last week's.
+    """Record this gameweek's recommendation, and score the ones already played.
 
-    Two jobs, run in this order every gameweek:
+    Safe to run on a schedule. Deciding what to do costs one request: the
+    gameweek deadlines, against the records already on disk. Only a run that
+    has something to do fetches player histories, so most runs are nearly free
+    and finish in seconds.
 
-    1. **Score** any recommendation already on record whose gameweek has
-       finished, next to the average of every entered team.
-    2. **Record** the recommendation for the next gameweek, before its
-       deadline.
-
-    A gameweek is only ever scored from a recommendation recorded *before* its
-    deadline, so the first run of this command scores nothing — there is
-    nothing on record yet. That is the point: the live table is the one result
-    here that cannot be re-run with a better answer.
-
-    Fetching the current season costs one request per player (one a second,
-    cached afterwards), so the first run takes a while.
+    Idempotent by construction. A gameweek is recorded at most once, only while
+    its deadline is still in the future, and a gameweek is scored only from a
+    recommendation recorded before that deadline. Everything else is a no-op.
     """
     _verbose(verbose)
     config = Config()
@@ -446,110 +444,162 @@ def track(
             f"unknown strategy {strategy!r}: choose from {sorted(STRATEGIES)}"
         )
 
-    console.print("Fetching the current season (one request per player)…")
+    # --- decide: one request ----------------------------------------------
     client = FPLClient(config=config)
     bootstrap = client.bootstrap_static()
-    fixtures = client.fixtures()
-    with console.status("loading") as status:
+    season = current_season(bootstrap)
+    events = events_from_bootstrap(bootstrap)
+    console.print(
+        f"FPL API reachable: {len(bootstrap['elements'])} players, "
+        f"{len(events)} gameweeks, season {season}"
+    )
+
+    recorded = {
+        int(row["gw"])
+        for row in events.to_dict("records")
+        if load_recommendation(season, int(row["gw"]), strategy, config) is not None
+    }
+    existing = tracked_frame(season, config)
+    scored = set() if existing.empty else {int(g) for g in existing["gw"]}
+    plan = plan_track(
+        season,
+        events,
+        recorded_gws=recorded,
+        scored_gws=scored,
+        next_gw=gw if gw is not None else next_gw(bootstrap),
+        now=datetime.now(timezone.utc),
+        strategy=strategy,
+    )
+    if plan.next_gw is not None:
+        console.print(
+            f"next gameweek GW{plan.next_gw}, deadline {plan.next_deadline}"
+        )
+
+    status: dict[str, object] = {
+        "season": season,
+        "strategy": strategy,
+        "next_gw": plan.next_gw,
+        "next_deadline": plan.next_deadline,
+        "recorded_gw": None,
+        "scored_gws": [],
+        "missed_gws": plan.missed_gws,
+        "api_players": len(bootstrap["elements"]),
+        "reason": plan.reason,
+    }
+
+    def finish() -> None:
+        if status_file is not None:
+            status_file.write_text(json.dumps(status, indent=2) + "\n")
+        frame = tracked_frame(season, config)
+        console.print("\n" + markdown_table(frame))
+        if plan.missed_gws:
+            console.print(
+                f"\n[red]No recommendation was ever recorded for "
+                f"GW{plan.missed_gws}, whose deadline has passed. Those "
+                f"gameweeks cannot be scored and are a permanent gap.[/red]"
+            )
+
+    if plan.nothing_to_do:
+        console.print(f"Nothing to do: {plan.reason or 'everything is up to date'}.")
+        finish()
+        raise typer.Exit(code=0)
+
+    # --- act: fetch only what the plan needs ------------------------------
+    if plan.needs_full_season:
+        console.print(
+            "Recording needs a projection for every player, so every player's "
+            "history (one request each)…"
+        )
+        wanted_ids = None
+    else:
+        # Scoring needs only the squads on record: fifteen players, not the
+        # whole game. The plan only lists gameweeks that have a record, so
+        # every lookup here resolves.
+        squads = [
+            load_recommendation(season, target, strategy, config)
+            for target in plan.score_gws
+        ]
+        wanted_ids = sorted({pid for rec in squads if rec for pid in rec.squad})
+        console.print(f"Scoring needs {len(wanted_ids)} player histories…")
+
+    with console.status("loading") as spinner:
         loaded = load_live_season(
             client=client,
             config=config,
             bootstrap=bootstrap,
-            fixtures=fixtures,
-            progress=lambda done, total: status.update(
+            fixtures=client.fixtures(),
+            player_ids=wanted_ids,
+            progress=lambda done, total: spinner.update(
                 f"player histories {done}/{total}"
             ),
         )
     rule_set = rules_from_bootstrap(bootstrap, config)
     rule_set.validate()
-    console.print(
-        f"{loaded.season}: {len(loaded.player_gws):,} player-gameweek rows, "
-        f"source {loaded.source}"
-    )
-
-    # --- 1. score whatever is already on record ---------------------------
     positions = positions_from(loaded)
-    scored_now: list[int] = []
-    for finished_gw in loaded.gameweeks:
-        if not is_finished(loaded, finished_gw):
-            continue
-        rec = load_recommendation(loaded.season, finished_gw, strategy, config)
-        if rec is None:
+
+    # --- score what is on record ------------------------------------------
+    for target in plan.score_gws:
+        rec = load_recommendation(season, target, strategy, config)
+        if rec is None:  # pragma: no cover - plan guarantees one exists
             continue
         try:
             tracked = score_recorded(loaded, rec, rule_set, positions=positions)
         except NotRecordedInAdvance as exc:
-            console.print(f"[yellow]GW{finished_gw}: {exc}[/yellow]")
+            console.print(f"[yellow]GW{target}: {exc}[/yellow]")
             continue
         if not dry_run:
             append_tracked(tracked, config)
-        scored_now.append(finished_gw)
-        delta = tracked.delta
+        status["scored_gws"] = list(status["scored_gws"]) + [target]
+        average = tracked.average_entry_score
         console.print(
-            f"GW{finished_gw}: recommended XI scored [bold]{tracked.points}[/bold], "
+            f"GW{target}: recommended XI scored [bold]{tracked.points}[/bold], "
             f"average manager "
-            f"{'unpublished' if tracked.average_entry_score is None else int(tracked.average_entry_score)}"
-            + ("" if delta is None else f" ([bold]{delta:+.0f}[/bold])")
-        )
-    if not scored_now:
-        console.print(
-            "Nothing to score yet: a gameweek counts only once it has been "
-            "called in advance and then played."
+            f"{'unpublished' if average is None else int(average)}"
+            + ("" if tracked.delta is None else f" ([bold]{tracked.delta:+.0f}[/bold])")
         )
 
-    # --- 2. record the next gameweek --------------------------------------
-    target = gw if gw is not None else next_gw(bootstrap)
-    if target is None:
-        console.print("[yellow]No upcoming gameweek to record for.[/yellow]")
-    elif (existing := load_recommendation(loaded.season, target, strategy, config)):
-        console.print(
-            f"GW{target} is already on record (written {existing.recorded_at}); "
-            f"leaving it alone."
-        )
-    else:
-        previous = _latest_recommendation(loaded, strategy, target, config)
+    # --- record the next gameweek -----------------------------------------
+    if plan.record_gw is not None:
+        previous = _latest_recommendation(season, strategy, plan.record_gw, config)
         try:
             rec = recommend(
                 loaded,
-                target,
+                plan.record_gw,
                 strategy,
                 rule_set,
                 config=config,
                 current=previous.as_squad() if previous else None,
             )
-        except (NotRecordedInAdvance, InfeasibleSquad) as exc:
-            console.print(f"[yellow]GW{target}: {exc}[/yellow]")
-            raise typer.Exit(code=0)
-
-        if dry_run:
-            console.print(f"[dim]--dry-run: not writing GW{target}[/dim]")
+            if dry_run:
+                console.print(f"[dim]--dry-run: not writing GW{plan.record_gw}[/dim]")
+            else:
+                path = record(rec, config)
+                console.print(f"Recorded GW{plan.record_gw} → {path.name}")
+            status["recorded_gw"] = plan.record_gw
+        except (NotRecordedInAdvance, InfeasibleSquad, FileExistsError) as exc:
+            console.print(f"[yellow]GW{plan.record_gw}: {exc}[/yellow]")
+            status["reason"] = str(exc)
         else:
-            path = record(rec, config)
-            console.print(f"Recorded GW{target} recommendation → {path.name}")
-        board = Table(title=f"GW{target} recommendation ({strategy})")
-        board.add_column("role")
-        board.add_column("player")
-        for pid in rec.starting:
-            role = (
-                "captain"
-                if pid == rec.captain
-                else "vice" if pid == rec.vice else "starter"
-            )
-            board.add_row(role, rec.names.get(str(pid), str(pid)))
-        for n, pid in enumerate(rec.bench, start=1):
-            board.add_row(f"bench {n}", rec.names.get(str(pid), str(pid)))
-        console.print(board)
-        if rec.deadline:
-            console.print(f"Deadline: {rec.deadline}")
+            board = Table(title=f"GW{plan.record_gw} recommendation ({strategy})")
+            board.add_column("role")
+            board.add_column("player")
+            for pid in rec.starting:
+                role = (
+                    "captain"
+                    if pid == rec.captain
+                    else "vice" if pid == rec.vice else "starter"
+                )
+                board.add_row(role, rec.names.get(str(pid), str(pid)))
+            for n, pid in enumerate(rec.bench, start=1):
+                board.add_row(f"bench {n}", rec.names.get(str(pid), str(pid)))
+            console.print(board)
 
-    # --- the running record -----------------------------------------------
-    frame = tracked_frame(loaded.season, config)
-    console.print("\n" + markdown_table(frame))
+    finish()
     _print_notes(loaded)
 
 
 def _latest_recommendation(
-    data: SeasonData, strategy: str, before_gw: int, config: Config
+    season: str, strategy: str, before_gw: int, config: Config
 ):
     """The most recent recommendation before ``before_gw``, if there is one.
 
@@ -557,7 +607,7 @@ def _latest_recommendation(
     decision from the last one rather than a fresh fifteen.
     """
     for candidate in range(before_gw - 1, 0, -1):
-        rec = load_recommendation(data.season, candidate, strategy, config)
+        rec = load_recommendation(season, candidate, strategy, config)
         if rec is not None:
             return rec
     return None

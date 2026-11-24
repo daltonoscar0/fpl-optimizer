@@ -236,11 +236,31 @@ fpl track                 # score what is on record, then call the next gameweek
 fpl track --dry-run       # see the recommendation without recording it
 ```
 
-Run it once a week before the deadline. The first run costs one request per
-player (one a second, cached afterwards) and scores nothing, because nothing is
-on record yet. The per-gameweek rows live in `results/live/`, one JSON
-recommendation per gameweek alongside the scored CSV, so each row can be traced
-back to the squad and the timestamp it came from.
+The per-gameweek rows live in `results/live/`: one JSON recommendation per
+gameweek alongside the scored CSV, so every row traces back to the squad and
+the timestamp it came from.
+
+**This runs itself.** [`.github/workflows/track.yml`](.github/workflows/track.yml)
+runs `fpl track` every four hours and commits any new record back to `main`.
+Four-hourly rather than weekly because a missed window cannot be made up: six
+chances a day means a transient API or runner failure costs nothing, where one
+chance a week would cost a gameweek.
+
+Almost every run does nothing, and cheaply. Deciding takes **one request** —
+the gameweek deadlines, checked against the records already committed — and
+only a run with something to do fetches player histories. Recording needs a
+projection for every player and so a history for each (~674 requests, one a
+second); scoring needs only the fifteen on record.
+
+The command is idempotent, which is what makes a schedule safe: a gameweek is
+written at most once, only while its deadline is still ahead, and never
+overwritten. Run it six times a day and at most one file per gameweek appears.
+
+Two things raise a GitHub issue, because silence is indistinguishable from
+working: a failed run, and a deadline that passed with nothing recorded for it.
+The second is the serious one — that gameweek can never be scored. Alerts
+deduplicate by title, so a standing problem is one issue with comments rather
+than six new issues a day.
 
 ## Known gaps
 
