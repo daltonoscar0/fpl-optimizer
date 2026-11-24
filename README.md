@@ -32,6 +32,7 @@ fpl data 2025-26                             # load a season and print its shape
 fpl project 2025-26 38 --strategy model      # expected points for one gameweek
 fpl backtest all --strategy all              # walk every season forward, score it
 fpl table                                    # the results table below, as Markdown
+fpl track                                    # call this gameweek, score the last
 ```
 
 Every command prints the data's *notes* alongside the numbers. A projection
