@@ -1027,6 +1027,31 @@ def transfers(
     hit_gain = with_hits.expected_points - free_only.expected_points
     gain = best.expected_points - hold.expected_points
 
+    # What is each individual transfer worth? Solve for one transfer, then two,
+    # then three, and difference the objectives: the k-th figure is the gain
+    # from being allowed one more move. Attributing a figure to a *named*
+    # transfer is only honest when the smaller plan is a subset of the larger —
+    # the optimizer is free to change its mind about which players to move when
+    # it gets another go, and often does.
+    chain: list[tuple[int, SquadPlan, float]] = []
+    previous = hold
+    nested = True
+    for k in range(1, best.n_transfers + 1):
+        step = optimize_squad(
+            candidates,
+            rule_set,
+            config=config,
+            current=held,
+            free_transfers=banked,
+            bank=money,
+            max_hits=max_hits,
+            max_transfers=k,
+        )
+        if not set(previous.transfers_in) <= set(step.transfers_in):
+            nested = False
+        chain.append((k, step, step.expected_points - previous.expected_points))
+        previous = step
+
     names = (
         data.player_gws.drop_duplicates("player_id")
         .set_index("player_id")["name"]
@@ -1069,6 +1094,51 @@ def transfers(
             f"[/bold]  ·  bank after: {best.bank / 10:.1f}m"
         )
 
+        # --- what each move is worth on its own ---------------------------
+        margins = Table(title="expected-points margin behind each move")
+        margins.add_column("move")
+        margins.add_column("transfer" if nested else "plan")
+        margins.add_column("margin", justify="right")
+        margins.add_column("confidence")
+        low_confidence: list[str] = []
+        for k, step, margin in chain:
+            if nested and step.transfers_in:
+                added_in = set(step.transfers_in) - set(
+                    chain[k - 2][1].transfers_in if k > 1 else ()
+                )
+                added_out = set(step.transfers_out) - set(
+                    chain[k - 2][1].transfers_out if k > 1 else ()
+                )
+                description = " · ".join(
+                    f"{label(o)} → {label(i)}"
+                    for o, i in zip(sorted(added_out), sorted(added_in))
+                ) or f"{k} transfers"
+            else:
+                description = f"{k} transfer(s) allowed"
+            thin = margin < THIN_MARGIN
+            if thin:
+                low_confidence.append(description)
+            margins.add_row(
+                f"#{k}",
+                description,
+                f"{margin:+.2f}",
+                "[yellow]low — under a point[/yellow]" if thin else "ok",
+            )
+        console.print(margins)
+        if not nested:
+            console.print(
+                "[dim]The margins are per additional transfer allowed, not per "
+                "named move: the optimizer changed which players it wanted when "
+                "given another go, so attributing a figure to one transfer "
+                "would misrepresent it.[/dim]"
+            )
+        if low_confidence:
+            console.print(
+                f"[yellow]Low confidence on {len(low_confidence)} move(s): a "
+                f"margin under {THIN_MARGIN:.0f} point is inside the "
+                f"projections' own error, so treat those as optional.[/yellow]"
+            )
+
     verdict = Table(title="is it worth it?")
     verdict.add_column("plan")
     verdict.add_column("transfers", justify="right")
@@ -1091,6 +1161,11 @@ def transfers(
     console.print(
         f"Expected gain over the horizon versus rolling: "
         f"[bold]{gain:+.2f}[/bold] points."
+        + (
+            f"  [yellow](under {THIN_MARGIN:.0f} point — low confidence)[/yellow]"
+            if 0 < gain < THIN_MARGIN
+            else ""
+        )
     )
     if max_hits <= 0:
         console.print("Hits were not considered (--max-hits 0).")

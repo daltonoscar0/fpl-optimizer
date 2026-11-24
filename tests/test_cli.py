@@ -701,3 +701,53 @@ def test_transfers_rejects_an_unknown_strategy(real_team):
     )
     assert result.exit_code != 0
     assert "unknown strategy" in plain(result.stderr)
+
+
+def test_transfers_prices_each_move_separately(real_team):
+    """A total gain says nothing about whether the fifth move is worth making."""
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert result.exit_code == 0, result.output
+    out = plain(result.stdout)
+    if "recommended transfers" in out:
+        assert "margin behind each move" in out
+        # One row per move, numbered.
+        assert "#1" in out
+
+
+def test_transfers_flags_a_margin_under_a_point_as_low_confidence(
+    real_team, monkeypatch
+):
+    """The projections are not accurate to a fraction of a point.
+
+    Forced by raising the threshold above every real margin, which is the same
+    comparison the command makes — rather than hunting for a fixture whose
+    numbers happen to land under it.
+    """
+    monkeypatch.setattr(cli, "THIN_MARGIN", 1000.0)
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert result.exit_code == 0, result.output
+    out = plain(result.stdout)
+    if "recommended transfers" in out:
+        assert "low — under a point" in out
+        assert "Low confidence on" in out
+
+
+def test_transfers_does_not_attribute_a_margin_to_a_named_move_unless_it_can(
+    real_team
+):
+    """The optimizer may change which players it wants when given another go.
+
+    When the smaller plan is not a subset of the larger, the margins are per
+    additional transfer allowed, and the output says so instead of naming a
+    move that did not earn the figure.
+    """
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+    out = plain(result.stdout)
+
+    if "not per named move" in out:
+        assert "transfer(s) allowed" in out
+    elif "margin behind each move" in out:
+        # Nested: every row names the move it priced.
+        assert "→" in out

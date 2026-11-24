@@ -306,8 +306,21 @@ does not reconcile, the prices or the squad are wrong and the output says so.
 The answer comes with its alternatives — hold and roll, spend free transfers
 only, or take a hit — each with its expected-points gain over the horizon. A
 hit is only recommended when it beats the free-transfer plan after paying for
-itself, and a margin under a point is reported as too thin to act on, because
-the projections are nowhere near that accurate.
+itself.
+
+Each move is also priced on its own, by solving for one transfer, then two,
+then three, and differencing the objectives. A total gain says nothing about
+whether the fifth move is worth making, and the answer is usually that it is
+not: the margins fall away quickly. **Anything under a point is flagged low
+confidence**, because the projections are nowhere near that accurate — a tenth
+of a point of advantage is noise with a decimal point on it.
+
+One caveat the output states for itself: those plans are often *not* nested.
+The best single transfer is not necessarily part of the best five — the
+optimizer will drop a player it wanted at three transfers and bring them back
+at four. When that happens the margins are reported per *additional transfer
+allowed* rather than attributed to a named move, because naming one would
+credit it with a figure it did not earn.
 
 `picks` only knows the last deadline. If you have transferred since, pass
 `--squad` with 15 names or ids and `--bank`. Names match FPL's display name,

@@ -213,6 +213,7 @@ def optimize_squad(
     bank: int = 0,
     budget: int | None = None,
     max_hits: int | None = None,
+    max_transfers: int | None = None,
     must_include: tuple[int, ...] = (),
     must_exclude: tuple[int, ...] = (),
     allow_excluded_clubs: bool = False,
@@ -232,6 +233,10 @@ def optimize_squad(
     budget:
         Overrides ``rules.budget`` for a fresh pick. Ignored when ``current`` is
         given, where the budget is the bank plus sale proceeds.
+    max_transfers:
+        Cap on transfers of any kind, free ones included. Solving for one, then
+        two, then three and differencing the objectives is how the marginal
+        value of each additional transfer is measured.
     max_hits:
         Cap on hit-taking transfers. ``0`` forbids them outright, which is how
         "what do my free transfers alone buy" is asked; ``None`` leaves the
@@ -357,6 +362,10 @@ def optimize_squad(
         problem += hits >= pulp.lpSum(in_squad[i] for i in incoming) - free_transfers
         if max_hits is not None:
             problem += hits <= int(max_hits)
+        if max_transfers is not None:
+            problem += (
+                pulp.lpSum(in_squad[i] for i in incoming) <= int(max_transfers)
+            )
     else:
         problem += (
             pulp.lpSum(price[i] * in_squad[i] for i in ids)
