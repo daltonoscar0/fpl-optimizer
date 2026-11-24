@@ -1,0 +1,217 @@
+name: track
+
+# The live record is only worth keeping if it is kept on time: a gameweek can
+# only be recorded before its deadline, and a deadline that passes unrecorded
+# is a permanent hole. So this runs every four hours rather than weekly — a
+# missed window cannot be made up later.
+#
+# Nearly every run does nothing. Deciding costs one request (the deadlines,
+# against the records already committed); only a run that has something to do
+# fetches player histories.
+
+on:
+  schedule:
+    # Every four hours. Six chances a day to catch a deadline, so a transient
+    # API or runner failure is not a lost gameweek.
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: "projection strategy"
+        default: model
+        type: choice
+        options: [model, ep, naive]
+      dry_run:
+        description: "decide without writing or committing"
+        default: false
+        type: boolean
+
+# Two runs at once could both decide to record the same gameweek, and the
+# second would fail on the push rather than on the duplicate.
+concurrency:
+  group: track
+  cancel-in-progress: false
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    # The only thing this job writes is a record under results/live.
+    permissions:
+      contents: write
+    timeout-minutes: 45
+    outputs:
+      recorded: ${{ steps.summary.outputs.recorded }}
+      scored: ${{ steps.summary.outputs.scored }}
+      missed: ${{ steps.summary.outputs.missed }}
+      next_gw: ${{ steps.summary.outputs.next_gw }}
+      next_deadline: ${{ steps.summary.outputs.next_deadline }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Track
+        id: track
+        env:
+          STRATEGY: ${{ inputs.strategy || 'model' }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          fpl track --strategy "$STRATEGY" $DRY_RUN --status-file status.json
+          echo '--- status.json ---'
+          cat status.json
+
+      - name: Read the status
+        id: summary
+        if: always() && hashFiles('status.json') != ''
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, pathlib
+          s = json.loads(pathlib.Path("status.json").read_text())
+          print(f"recorded={s.get('recorded_gw') or ''}")
+          print(f"scored={','.join(str(g) for g in s.get('scored_gws') or [])}")
+          print(f"missed={','.join(str(g) for g in s.get('missed_gws') or [])}")
+          print(f"next_gw={s.get('next_gw') or ''}")
+          print(f"next_deadline={s.get('next_deadline') or ''}")
+          PY
+
+      - name: Commit the record
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ -z "$(git status --porcelain results/live)" ]; then
+            echo "No new records — nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results/live
+          git commit -m "$(printf 'Record live gameweek data\n\n%s\n\nWritten by the scheduled track workflow (run %s).' \
+            "$(git diff --cached --name-only | sed 's/^/  /')" "$GITHUB_RUN_ID")"
+          # Rebase rather than force: a human commit landing mid-run must win.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      # GitHub disables scheduled workflows in public repositories after 60
+      # days with no repository activity. During the season this job commits a
+      # record most weeks, so the question never arises — but between late May
+      # and mid-August there are no gameweeks, no records, and therefore no
+      # commits for about eighty days. The schedule would be switched off
+      # exactly once a year, in the gap where nobody is watching it, and would
+      # come back to a season already under way.
+      #
+      # So when nothing has been committed for a while, commit the fact that
+      # the check ran. It is a heartbeat, kept out of results/live because it
+      # is not a record of anything.
+      - name: Heartbeat, so the schedule is not disabled for inactivity
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          last=$(git log -1 --format=%ct)
+          now=$(date -u +%s)
+          days=$(( (now - last) / 86400 ))
+          echo "last commit was $days days ago"
+          if [ "$days" -lt 45 ]; then
+            echo "Recent activity — no heartbeat needed."
+            exit 0
+          fi
+          printf 'last checked: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > .github/track-heartbeat
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/track-heartbeat
+          git commit -m "Heartbeat: keep the track schedule alive through the off-season"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('status.json') != ''
+        with:
+          name: track-status
+          path: status.json
+          retention-days: 30
+
+  # A separate job, because raising an issue needs a scope the tracking job
+  # must not have. This one can open issues and nothing else; it cannot write
+  # to the repository.
+  notify:
+    needs: track
+    if: always() && (needs.track.result == 'failure' || needs.track.outputs.missed != '')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      # The body is rendered by Python rather than by nested heredocs: the
+      # shell version was unparseable inside a YAML block scalar once it
+      # contained backticks and an apostrophe, and a notifier that cannot run
+      # is worse than no notifier.
+      - name: Render the alert
+        id: alert
+        env:
+          RESULT: ${{ needs.track.result }}
+          MISSED: ${{ needs.track.outputs.missed }}
+          NEXT_GW: ${{ needs.track.outputs.next_gw }}
+          NEXT_DEADLINE: ${{ needs.track.outputs.next_deadline }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, pathlib
+
+          missed = os.environ.get("MISSED", "").strip()
+          next_gw = os.environ.get("NEXT_GW") or "?"
+          deadline = os.environ.get("NEXT_DEADLINE") or "unknown"
+          run_url = os.environ["RUN_URL"]
+
+          if missed:
+              key = "live record: missed gameweek"
+              body = f"""A deadline passed with nothing on record, so those gameweeks can never
+          be scored: `fpl track` will not score a gameweek it did not call in
+          advance, and that refusal is the point of the whole record.
+
+          **Missed:** GW{missed}
+          **Next gameweek:** GW{next_gw}, deadline {deadline}
+
+          The gap is permanent — what is worth checking is why the window was
+          missed, so that the next one is not. [Run log]({run_url})
+          """
+          else:
+              key = "live record: run failed"
+              body = f"""The scheduled `fpl track` run failed, so the upcoming gameweek may not
+          have been recorded.
+
+          **Next gameweek:** GW{next_gw}, deadline {deadline}
+          **Run:** {run_url}
+
+          There are six runs a day, so a transient failure should clear itself
+          well before the deadline. If it does not, the gameweek is lost from
+          the record rather than recoverable later.
+          """
+
+          pathlib.Path("alert.md").write_text(body)
+          print(f"key={key}")
+          PY
+
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          KEY: ${{ steps.alert.outputs.key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # One issue per condition, not one per run: six runs a day would
+          # otherwise mean six issues a day restating the same fact.
+          existing=$(gh issue list --repo "$REPO" --state open --search "$KEY in:title" \
+            --json number,title --jq "map(select(.title | startswith(\"$KEY\"))) | .[0].number // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" \
+              --body "Still outstanding as of this run: $RUN_URL"
+          else
+            gh issue create --repo "$REPO" --title "$KEY" --body-file alert.md
+          fi

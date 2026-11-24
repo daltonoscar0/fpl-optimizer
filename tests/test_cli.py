@@ -8,6 +8,8 @@ pointed at the committed archive slice so no command reaches the network.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -271,15 +273,39 @@ def live(monkeypatch, tmp_path):
     data = hand_built_season()
     events = data.events.copy()
     events.loc[events["gw"] == 3, "finished"] = False
+    # GW3 is the upcoming one, so its deadline has to actually be upcoming:
+    # `track` refuses to record a gameweek whose deadline has passed, which is
+    # the behaviour under test everywhere else in this file.
+    upcoming = (datetime.now(timezone.utc) + timedelta(days=3)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    events.loc[events["gw"] == 3, "deadline_time"] = upcoming
     data.events = events
     data.source = "live"
+
+    # A bootstrap payload consistent with the season, because deciding what to
+    # do reads it: the deadlines, the finished flags and which gameweek is next.
+    bootstrap = {
+        "events": [
+            {
+                "id": int(row["gw"]),
+                "deadline_time": row["deadline_time"],
+                "finished": bool(row["finished"]),
+                "is_current": int(row["gw"]) == 2,
+                "is_next": int(row["gw"]) == 3,
+                "average_entry_score": row["average_entry_score"],
+            }
+            for row in data.events.to_dict("records")
+        ],
+        "elements": [{"id": pid} for pid in data.player_gws["player_id"].unique()],
+    }
 
     class StubClient:
         def __init__(self, *a, **k):
             pass
 
         def bootstrap_static(self):
-            return {}
+            return bootstrap
 
         def fixtures(self):
             return []
@@ -289,15 +315,21 @@ def live(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli, "rules_from_bootstrap", lambda *a, **k: archive_season_rules("2024-25")
     )
-    monkeypatch.setattr(cli, "next_gw", lambda *a, **k: 3)
     monkeypatch.setattr(
-        cli, "Config", lambda *a, **k: Config(excluded_clubs=(), horizon=2, results_dir=tmp_path)
+        cli,
+        "Config",
+        lambda *a, **k: Config(
+            excluded_clubs=(), horizon=2, results_dir=tmp_path
+        ),
     )
-    return data, tmp_path
+    # Deadlines are read from the bootstrap payload, not from the loaded season
+    # — that is the point of the cheap decide step — so a test that moves a
+    # deadline has to move it there.
+    return SimpleNamespace(data=data, results_dir=tmp_path, bootstrap=bootstrap)
 
 
 def test_track_records_the_upcoming_gameweek(live):
-    _, results_dir = live
+    results_dir = live.results_dir
     result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
 
     assert result.exit_code == 0, result.output
@@ -310,12 +342,54 @@ def test_track_records_the_upcoming_gameweek(live):
 
 
 def test_track_scores_nothing_on_its_first_run(live):
-    """There is nothing on record yet, and it says so instead of inventing one."""
+    """There is nothing on record yet, so nothing is scored.
+
+    The first run records — that is something to do — but it cannot score any
+    of the gameweeks already played, because nobody called them in advance.
+    """
     result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
 
     assert result.exit_code == 0
-    assert "Nothing to score yet" in result.stdout
+    assert "recommended XI scored" not in result.stdout
     assert "no gameweek called in advance yet" in result.stdout
+
+
+def test_track_does_nothing_once_the_gameweek_is_on_record(live):
+    """The idempotent case, which is what a four-hourly schedule mostly hits."""
+    runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+
+    assert result.exit_code == 0
+    assert "Nothing to do" in result.stdout
+    assert "already on record" in result.stdout
+
+
+def test_track_refuses_to_record_once_the_deadline_has_passed(live):
+    """A record made after the deadline is worth nothing, so none is made."""
+    results_dir = live.results_dir
+    for event in live.bootstrap["events"]:
+        if event["id"] == 3:
+            event["deadline_time"] = "2024-09-03T11:30:00Z"
+
+    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    assert result.exit_code == 0
+    assert "deadline has passed" in result.stdout
+    assert not list((results_dir / "live").glob("*-gw03-*.json"))
+
+
+def test_track_writes_a_status_file_for_automation(live, tmp_path):
+    status = tmp_path / "status.json"
+    result = runner.invoke(
+        cli.app, ["track", "--strategy", "ep", "--status-file", str(status)]
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(status.read_text())
+    assert payload["recorded_gw"] == 3
+    assert payload["scored_gws"] == []
+    assert payload["missed_gws"] == []
+    assert payload["next_gw"] == 3
+    assert payload["api_players"] == 18
 
 
 def test_track_will_not_overwrite_a_recommendation_already_on_record(live):
@@ -328,7 +402,7 @@ def test_track_will_not_overwrite_a_recommendation_already_on_record(live):
 
 
 def test_track_dry_run_decides_but_writes_nothing(live):
-    _, results_dir = live
+    results_dir = live.results_dir
     result = runner.invoke(cli.app, ["track", "--strategy", "ep", "--dry-run"])
 
     assert result.exit_code == 0
@@ -341,7 +415,7 @@ def test_track_scores_a_gameweek_that_was_called_in_advance(live):
     from fpl_optimizer.track import record, recommend
     from fpl_optimizer.rules import archive_season_rules
 
-    data, results_dir = live
+    data, results_dir = live.data, live.results_dir
     config = Config(excluded_clubs=(), horizon=2, results_dir=results_dir)
     rec = recommend(
         data,
