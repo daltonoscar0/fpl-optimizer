@@ -120,14 +120,38 @@ spent 74.5m of 100.0m and then cost 40 points in hits to unwind.
 Reproduce with `fpl backtest all --strategy all && fpl table`. Per-gameweek
 records are written to `results/`.
 
-RESULTS_TABLE_PLACEHOLDER
+| Season | Strategy | Gameweeks decided | Points in common window | vs `naive` |
+|---|---|---|---|---|
+| 2023-24 | `model` | 34 of 34 | 2049 over 34 GWs | +226 |
+| 2023-24 | `naive` | 37 of 37 | 1823 over 34 GWs | — |
+| 2024-25 | `model` | 34 of 34 | 2073 over 34 GWs | +144 |
+| 2024-25 | `naive` | 37 of 37 | 1929 over 34 GWs | — |
+| 2025-26 | `model` | 34 of 34 | 1891 over 34 GWs | +98 |
+| 2025-26 | `naive` | 37 of 37 | 1793 over 34 GWs | — |
+
+`ep` is omitted for 2023-24 — the published expected-points column rates 66% of
+non-appearances at exactly zero, so this strategy already knows who played. It
+scored 3349 (88.13 a gameweek), against a human record nearer 71.
+
+`ep` is omitted for 2024-25 — the same column rates 64% of non-appearances at
+exactly zero. It scored 3197 (84.13 a gameweek). For 2025-26 it is not run at
+all: coverage is 29%, below the 80% threshold.
+
+The model beats the naive baseline in all three seasons, by 98 to 226 points
+over 34 gameweeks — 3 to 7 points a gameweek. That is a real margin and a
+modest one, which is roughly what a linear model on public data should be
+expected to manage. A projection claiming much more than this against a
+baseline this crude would be worth re-checking for exactly the sort of problem
+the `ep` column turned out to have.
 
 Totals are measured over the **common window**: the gameweeks every strategy in
 a season actually decided. They start in different places and that has to be
-accounted for rather than averaged away — `naive` has no opinion until a
-gameweek has been played, and the model has none until it has three gameweeks
-to fit on, so the earliest gameweeks belong to neither. Comparing a 38-gameweek
-total against a 34-gameweek one would flatter whoever played longest.
+accounted for rather than averaged away. `naive` has no opinion until a
+gameweek has been played, so it starts at GW2. The model needs three played
+gameweeks to fit on, so it starts at GW5 — and it will not borrow FPL's
+published figure to cover the gap, because on this data that figure knows who
+played. Comparing a 37-gameweek total against a 34-gameweek one would flatter
+whoever was on the pitch longest, so the window is the 34 they share.
 
 What the comparison is for: both strategies run through *identical* machinery —
 same candidate pool, same integer program, same scorer, same rules — so the gap
@@ -136,15 +160,19 @@ between them is attributable to the projections and to nothing else.
 ### Why `ep` is not in the table
 
 FPL's own published expected points were meant to be the honest middle
-baseline. The backtest scores them at 3349 points in 2023-24 and 3185 in
-2024-25, or 84–88 per gameweek. Nobody scores 88 points a gameweek over a
-season; the record for ten million players is nearer 71.
+baseline, and the omission line under the table is the reason they are not. A
+strategy reading the archive's `xP` already knows who played, so its total is
+not a forecasting result — it is a measurement of how much playing time is
+worth, which is most of an FPL score.
 
-That is the number doing the telling. The archive's `xP` rates 64–66% of
-non-appearances at exactly zero, so a strategy reading it already knows who
-played — see **Known gaps**. The figures above are reported here as the
-evidence for excluding it, not as a result. `results/` keeps the full
-per-gameweek records for anyone who wants to check the claim.
+The giveaway was the size of it. The first backtest that ran came out at 88
+points a gameweek, and no human manager scores 88 a gameweek over a season;
+the record across ten million players is nearer 71. A number that good from a
+baseline that simple is a reason to go and check the column, not to publish the
+finding. See **Known gaps** for what the check found.
+
+It is still run, and `results/` keeps its full per-gameweek records, so the
+claim can be checked rather than taken on trust.
 
 ## Known gaps
 
@@ -191,6 +219,11 @@ what the results table can honestly claim.
 pytest                  # the suite is offline; sockets are blocked per test
 pytest -m network       # the few tests that may reach the network
 ```
+
+The full backtest — three seasons, three strategies, a model refit and an
+integer-program solve before every gameweek — takes about ten minutes on a
+laptop and is deterministic: re-running it reproduces every squad, transfer and
+score exactly.
 
 The suite runs with network access blocked, so a test cannot accidentally pass
 against whatever the FPL API happened to be serving that day; the committed

@@ -13,6 +13,7 @@ to read them.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from fpl_optimizer.backtest import (
@@ -294,6 +295,32 @@ def test_compare_puts_the_strategies_side_by_side(season, rules, config):
     )
     assert int(ep_row["window_gws"]) == int(naive_row["window_gws"]) == 2
     assert int(ep_row["gameweeks"]) == 3 and int(naive_row["gameweeks"]) == 2
+
+
+def test_a_strategy_that_knows_who_played_is_marked_not_comparable(rules, config):
+    """It still runs and still scores; what it does not get is a comparison.
+
+    A gap against the baseline would read as a finding about projections, when
+    it is a finding about a data column.
+    """
+    data = hand_built_season()
+    df = data.player_gws.copy()
+    absent = pd.to_numeric(df["minutes"], errors="coerce").fillna(0) == 0
+    df.loc[absent, "ep"] = 0.0
+    df.loc[~absent, "ep"] = 4.0
+    data.player_gws = df
+
+    result = backtest(data, "ep", rules, config=config)
+    assert not result.comparable
+    assert "knows who played" in (result.not_comparable_because or "")
+    assert result.total_points > 0, "it is still run and still scored"
+
+    naive = backtest(data, "naive", rules, config=config)
+    assert naive.comparable
+    table = compare([result, naive])
+    ep_row = table[table["strategy"] == "ep"].iloc[0]
+    assert ep_row["vs_naive"] is None or pd.isna(ep_row["vs_naive"])
+    assert int(ep_row["window_points"]) > 0, "the figure is reported, not hidden"
 
 
 def test_the_frame_and_summary_describe_the_same_season(season, rules, config):

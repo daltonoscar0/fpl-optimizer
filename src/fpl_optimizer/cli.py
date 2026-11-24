@@ -300,6 +300,7 @@ def backtest(
         "per_gw",
         "transfers",
         "hits",
+        "comparable",
         "vs_naive",
     )
     display = Table(title="backtest")

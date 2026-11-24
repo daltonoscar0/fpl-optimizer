@@ -455,9 +455,12 @@ def compare(results: list[BacktestResult]) -> pd.DataFrame:
                 "per_gw": round(r.points_per_gameweek, 2),
                 "transfers": r.total_transfers,
                 "hits": r.total_hits,
+                "comparable": r.comparable,
+                # Withheld for a result that read something the others could
+                # not: a gap against the baseline would read as a finding.
                 "vs_naive": (
                     None
-                    if baseline is None or r.strategy == "naive"
+                    if baseline is None or r.strategy == "naive" or not r.comparable
                     else window_points - baseline
                 ),
             }
