@@ -119,7 +119,12 @@ def test_selling_prices_default_to_the_market_price(season):
     assert int(indexed.loc[2, "selling_price"]) == int(indexed.loc[2, "price"])
 
 
-def test_the_horizon_discounts_later_gameweeks(season):
+def test_the_horizon_is_a_weighted_average_not_a_sum(season):
+    """On the same scale as one gameweek, which is what keeps hits honest.
+
+    Summed, the horizon would count a transfer's gain three or four times over
+    against a hit charged once, and the program would churn the squad.
+    """
     proj = EPProjection()
     future = horizon_predictions(proj, season, 1, horizon=2, decay=0.5)
     direct = {
@@ -127,9 +132,12 @@ def test_the_horizon_discounts_later_gameweeks(season):
     }
     got = future.set_index("player_id")["xpts"]
 
-    # Gameweek 2 at half weight, gameweek 3 at a quarter.
-    expected = direct[2][4] * 0.5 + direct[3][4] * 0.25
+    # Gameweek 2 at half weight, gameweek 3 at a quarter, divided by 0.75.
+    expected = (direct[2][4] * 0.5 + direct[3][4] * 0.25) / 0.75
     assert got[4] == pytest.approx(expected)
+    # Bounded by the gameweeks it averages, which a sum would not be.
+    assert got[4] <= max(direct[2][4], direct[3][4]) + 1e-9
+    assert got[4] >= min(direct[2][4], direct[3][4]) - 1e-9
 
 
 def test_the_horizon_runs_out_at_the_end_of_the_season(season):

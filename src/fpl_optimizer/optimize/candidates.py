@@ -121,15 +121,29 @@ def horizon_predictions(
     horizon: int,
     decay: float,
 ) -> pd.DataFrame:
-    """Discounted expected points over the ``horizon`` gameweeks after ``gw``.
+    """Expected points per gameweek over the ``horizon`` gameweeks after ``gw``.
 
-    Each later gameweek is worth ``decay ** k`` of its face value, so a player's
-    value to the squad reflects the fixtures ahead without letting gameweek
-    ``gw + 4`` outweigh the one being decided. The projection is *not* refitted
-    per gameweek here: it was fitted on history before ``gw``, and asking it
-    about later gameweeks uses only their pre-deadline facts.
+    Each later gameweek is weighted ``decay ** k``, so the fixtures ahead inform
+    who is worth owning without gameweek ``gw + 4`` outweighing the one being
+    decided. The projection is *not* refitted here: it was fitted on history
+    before ``gw``, and asking it about later gameweeks reads only their
+    pre-deadline facts.
+
+    The result is a weighted **average**, not a sum, and that choice is load
+    bearing. Summed, a transfer's per-gameweek gain is counted once for this
+    gameweek and again for every gameweek in the horizon — three or four times
+    over — while the four-point hit is charged once. The program then buys
+    almost anything: an early run of this backtest took 88 points of hits in
+    ten gameweeks. Worse, the future half of that benefit is not even locked in,
+    because next gameweek re-solves and may sell the player straight back.
+
+    Averaged, ``xpts_future`` is on the same scale as ``xpts``: the two terms
+    together are worth about two gameweeks, so a transfer has to find roughly
+    two points a gameweek to justify a hit. That is about where a human manager
+    draws the line too.
     """
     frames = []
+    total_weight = 0.0
     for step in range(1, horizon + 1):
         target = gw + step
         if target not in set(data.gameweeks):
@@ -137,13 +151,22 @@ def horizon_predictions(
         preds = projection.predict(data, target)
         if preds.empty:
             continue
+        weight = decay**step
+        total_weight += weight
         frames.append(
-            preds.assign(xpts=preds["xpts"] * (decay**step))[["player_id", "xpts"]]
+            preds.assign(xpts=preds["xpts"] * weight)[["player_id", "xpts"]]
         )
-    if not frames:
-        return pd.DataFrame({"player_id": pd.Series(dtype="int64"), "xpts": pd.Series(dtype="float64")})
-    return (
+    if not frames or total_weight <= 0:
+        return pd.DataFrame(
+            {
+                "player_id": pd.Series(dtype="int64"),
+                "xpts": pd.Series(dtype="float64"),
+            }
+        )
+    summed = (
         pd.concat(frames, ignore_index=True)
         .groupby("player_id", as_index=False)["xpts"]
         .sum()
     )
+    summed["xpts"] = summed["xpts"] / total_weight
+    return summed

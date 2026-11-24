@@ -7,6 +7,8 @@ pointed at the committed archive slice so no command reaches the network.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from typer.testing import CliRunner
 
@@ -123,3 +125,98 @@ def test_project_on_a_gameweek_with_no_fixtures_is_not_an_error():
     )
     assert result.exit_code == 0
     assert "No projection" in result.stdout
+
+
+# --- backtest and table -----------------------------------------------------
+
+
+@pytest.fixture
+def hand_built(monkeypatch):
+    """Point the loader at the hand-built season.
+
+    The committed archive slice has two clubs, and three players per club caps a
+    squad at six — not fifteen — so it cannot be backtested. The hand-built
+    season has six clubs, which is the smallest thing that can.
+    """
+    from .fixtures.handbuilt import hand_built_season
+
+    monkeypatch.setattr(cli, "load_season", lambda *a, **k: hand_built_season())
+    monkeypatch.setattr(cli, "available_seasons", lambda: ("2024-25",))
+    return hand_built_season()
+
+
+def test_backtest_writes_a_csv_and_a_summary(hand_built, tmp_path):
+    result = runner.invoke(
+        cli.app,
+        ["backtest", "2024-25", "--strategy", "ep", "--out", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "2024-25-ep.csv").exists()
+    assert (tmp_path / "summary.json").exists()
+
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary[0]["strategy"] == "ep"
+    assert summary[0]["total_points"] > 0
+    assert "points" in (tmp_path / "2024-25-ep.csv").read_text()
+
+
+def test_backtest_runs_every_strategy_when_asked(hand_built, tmp_path):
+    result = runner.invoke(
+        cli.app, ["backtest", "all", "--strategy", "all", "--out", str(tmp_path)]
+    )
+    assert result.exit_code == 0, result.output
+
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert {s["strategy"] for s in summary} == {"model", "ep", "naive"}
+
+
+def test_backtest_skips_expected_points_below_the_coverage_threshold(
+    monkeypatch, tmp_path
+):
+    """A season whose xP was never collected is reported as skipped, not run."""
+    from .fixtures.handbuilt import hand_built_season
+
+    data = hand_built_season()
+    df = data.player_gws.copy()
+    df["ep"] = float("nan")
+    data.player_gws = df
+    monkeypatch.setattr(cli, "load_season", lambda *a, **k: data)
+
+    result = runner.invoke(
+        cli.app,
+        ["backtest", "2024-25", "--strategy", "ep", "--out", str(tmp_path)],
+    )
+    assert result.exit_code == 0
+    assert "skipped" in result.stdout
+    assert not (tmp_path / "2024-25-ep.csv").exists()
+
+
+def test_backtest_rejects_an_unknown_strategy(hand_built, tmp_path):
+    result = runner.invoke(
+        cli.app,
+        ["backtest", "2024-25", "--strategy", "vibes", "--out", str(tmp_path)],
+    )
+    assert result.exit_code != 0
+    assert "unknown strategy" in result.stderr
+
+
+def test_table_prints_markdown_with_the_window_stated(hand_built, tmp_path):
+    runner.invoke(
+        cli.app, ["backtest", "2024-25", "--strategy", "all", "--out", str(tmp_path)]
+    )
+    result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    lines = [l for l in result.stdout.splitlines() if l.startswith("|")]
+    assert lines[0].startswith("| Season | Strategy |")
+    assert "common window" in lines[0]
+    # One header, one separator, one row per strategy.
+    assert len(lines) >= 4
+    assert any("`naive`" in l for l in lines)
+    assert any("GWs" in l for l in lines)
+
+
+def test_table_without_a_backtest_says_what_to_run(tmp_path):
+    result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "fpl backtest" in result.stderr

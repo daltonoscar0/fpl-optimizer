@@ -77,12 +77,23 @@ def test_history_before_a_double_counts_only_earlier_gameweeks(season):
 # --- the strategies, against arithmetic done on paper -----------------------
 
 
-def test_fpl_expected_points_adds_both_legs(season):
-    """Keeper 2.0 + 3.0, playmaker 4.0 + 2.0, fullback 1.5 + 2.5, finisher 6.0 + 4.0."""
+def test_fpl_expected_points_is_published_once_per_gameweek(season):
+    """It does *not* add both legs, because there is only one figure to add.
+
+    FPL quotes one ``ep_next`` per player per gameweek. The archive's ``xP`` is
+    that same figure, and in all 1,278 double-gameweek player-gameweeks across
+    2023-24 and 2024-25 it is identical on both fixture rows — so summing it
+    would double a number nobody published. The fixture repeats the value the
+    way the real source does, and the projection takes it once.
+    """
     preds = EPProjection().predict(season, DOUBLE_GW).set_index("player_id")["xpts"]
     assert preds.loc[PINNED].to_dict() == pytest.approx(
-        {1: 5.0, 2: 6.0, 3: 4.0, 4: 10.0}
+        {1: 3.0, 2: 4.0, 3: 2.5, 4: 6.0}
     )
+
+    rows = season.pre_deadline_at(DOUBLE_GW)
+    doubled = rows.groupby("player_id")["ep"].nunique()
+    assert doubled.loc[list(DOUBLED)].eq(1).all(), "the fixture must repeat, not vary"
 
 
 def test_naive_rate_is_per_fixture_and_so_doubles(season):
@@ -121,24 +132,32 @@ def test_naive_divides_by_fixtures_not_gameweeks(season):
     assert preds[1] == pytest.approx(8 / 3)
 
 
-def test_the_two_baselines_agree_on_what_a_double_is_worth(season):
-    """Not that they agree on the value — that they agree on the *scaling*.
+def test_the_baselines_disagree_about_doubles_and_that_is_the_source_talking(
+    season,
+):
+    """Naive scales with fixtures; FPL's published figure cannot.
 
-    Each strategy's total for a two-fixture gameweek must be the sum of its two
-    per-fixture figures. That is the property the backtest needs in order to
-    attribute a difference in results to projection quality.
+    This asymmetry is not a bug to be reconciled. A per-fixture rate can be
+    doubled for a double gameweek because it is quoted per fixture. FPL's
+    number is quoted per gameweek and says nothing about how many matches are
+    in it, so doubling it would be inventing data. The consequence — that the
+    ``ep`` baseline undervalues doubles — is a limitation of the source, and
+    is recorded as one.
     """
-    ep = EPProjection()
-    naive = NaiveProjection()
-    naive.fit(season, DOUBLE_GW)
     rows = season.pre_deadline_at(DOUBLE_GW)
 
-    for proj, per_fixture in (
-        (ep, rows.groupby("player_id")["ep"].sum()),
-        (naive, rows["player_id"].map(naive._ppf).groupby(rows["player_id"]).sum()),
-    ):
-        preds = proj.predict(season, DOUBLE_GW).set_index("player_id")["xpts"]
-        assert preds.to_dict() == pytest.approx(per_fixture.to_dict())
+    naive = NaiveProjection()
+    naive.fit(season, DOUBLE_GW)
+    naive_preds = naive.predict(season, DOUBLE_GW).set_index("player_id")["xpts"]
+    per_fixture = rows["player_id"].map(naive._ppf).groupby(rows["player_id"]).sum()
+    assert naive_preds.to_dict() == pytest.approx(per_fixture.to_dict())
+
+    ep_preds = EPProjection().predict(season, DOUBLE_GW).set_index("player_id")["xpts"]
+    published = rows.groupby("player_id")["ep"].max()
+    assert ep_preds.to_dict() == pytest.approx(published.to_dict())
+    # Strictly less than the sum, for exactly the players who play twice.
+    summed = rows.groupby("player_id")["ep"].sum()
+    assert (ep_preds.loc[list(DOUBLED)] < summed.loc[list(DOUBLED)]).all()
 
 
 def test_the_model_sums_its_own_per_fixture_heads():

@@ -180,6 +180,7 @@ def make_season(
                             "kickoff_time": kickoff,
                             # FPL's published figure: the truth, blurred. Good
                             # enough to beat the naive baseline, not perfect.
+                            # Collapsed to one value per gameweek below.
                             "ep": (
                                 round(float(points) * 0.6 + rng.normal(0, 0.8), 1)
                                 if with_ep
@@ -212,9 +213,13 @@ def make_season(
                     )
             fixture_id += 1
 
-    player_gws = coerce_player_gws(
-        pd.DataFrame(rows).drop(columns=["_scored"])
-    ).sort_values(["gw", "player_id", "fixture_id"], kind="stable")
+    frame = pd.DataFrame(rows).drop(columns=["_scored"])
+    # One `ep` per player per gameweek, repeated across a double's two rows,
+    # because that is how FPL publishes it and how the archive records it.
+    frame["ep"] = frame.groupby(["player_id", "gw"])["ep"].transform("first")
+    player_gws = coerce_player_gws(frame).sort_values(
+        ["gw", "player_id", "fixture_id"], kind="stable"
+    )
     player_gws = player_gws.reset_index(drop=True)
 
     clubs = pd.DataFrame(

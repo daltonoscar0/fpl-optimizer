@@ -225,6 +225,29 @@ def normalize_archive_season(
     )
     player_gws = player_gws.reset_index(drop=True)
 
+    # Does the published figure already know who played? It should not be able
+    # to: FPL quotes an `ep_next` for every registered player before the
+    # deadline, including the nailed starter who is then a surprise omission.
+    if "xP" in merged.columns:
+        # Imported here rather than at module scope: the projections package
+        # pulls in JAX, and loading a CSV should not cost that.
+        from .projections.baselines import EP_HINDSIGHT_THRESHOLD
+
+        absent = player_gws[
+            pd.to_numeric(player_gws["minutes"], errors="coerce").fillna(0) == 0
+        ]["ep"]
+        absent = pd.to_numeric(absent, errors="coerce").dropna()
+        if len(absent):
+            share_zero = float((absent == 0).mean())
+            if share_zero > EP_HINDSIGHT_THRESHOLD:
+                notes.append(
+                    f"archive `xP` knows who played: {share_zero:.0%} of "
+                    f"player-gameweeks with zero minutes are rated exactly 0.0, "
+                    f"which a pre-deadline forecast could not do. The FPL "
+                    f"expected-points baseline is therefore not comparable with "
+                    f"strategies that had to guess playing time"
+                )
+
     if "xP" not in merged.columns:
         notes.append("no `xP` column: the FPL expected-points baseline is unavailable")
     elif ep_zero_gws:

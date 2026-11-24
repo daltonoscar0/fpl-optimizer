@@ -146,7 +146,7 @@ def test_ep_reads_the_published_figure(season):
     proj = EPProjection()
     proj.fit(season, 7)
     preds = proj.predict(season, 7).set_index("player_id")["xpts"]
-    expected = season.pre_deadline_at(7).groupby("player_id")["ep"].sum()
+    expected = season.pre_deadline_at(7).groupby("player_id")["ep"].max()
 
     assert len(preds) == len(expected)
     assert preds.sort_index().to_numpy() == pytest.approx(
@@ -154,18 +154,26 @@ def test_ep_reads_the_published_figure(season):
     )
 
 
-def test_ep_counts_both_fixtures_of_a_double(season):
+def test_ep_takes_the_published_figure_once_in_a_double(season):
+    """FPL quotes expected points per gameweek, so there is nothing to add.
+
+    The archive repeats the identical value on both fixture rows of a double —
+    in every such player-gameweek across two seasons — so summing it would
+    report expected points FPL never published. See `EPProjection`.
+    """
     proj = EPProjection()
     rows = season.pre_deadline_at(DOUBLE_GW)
-    doubled = rows.groupby("player_id").size()
-    doubled = doubled[doubled == 2].index
+    sizes = rows.groupby("player_id").size()
+    doubled = sizes[sizes == 2].index
     preds = proj.predict(season, DOUBLE_GW).set_index("player_id")["xpts"]
-    per_fixture = rows.groupby("player_id")["ep"].sum()
+    published = rows.groupby("player_id")["ep"].max()
 
     assert len(doubled) > 0
     assert preds.loc[doubled].to_numpy() == pytest.approx(
-        per_fixture.loc[doubled].to_numpy(), abs=1e-5
+        published.loc[doubled].to_numpy(), abs=1e-5
     )
+    summed = rows.groupby("player_id")["ep"].sum()
+    assert (preds.loc[doubled] < summed.loc[doubled]).all()
 
 
 def test_ep_reports_itself_unavailable_rather_than_predicting_zero():

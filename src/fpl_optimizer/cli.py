@@ -12,6 +12,10 @@ an honest inventory of what the project can actually do:
     known gap in the data is recorded.
 ``fpl project``
     Run one projection strategy for one gameweek and show the top of its board.
+``fpl backtest``
+    Walk a season forward, deciding before each gameweek and scoring after it.
+``fpl table``
+    Turn the backtest summary into the Markdown table in the README.
 
 Every command prints the source and the notes rather than only the numbers. A
 projection that is quietly running on a fallback, or a season whose expected
@@ -21,14 +25,20 @@ conclusion three steps later if it is not said out loud.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
+import pandas as pd
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from .archive import available_seasons, load_season
+from .backtest import BacktestResult, compare
+from .backtest import backtest as run_backtest
 from .config import Config
+from .features import FeatureCache
 from .projections import STRATEGIES
 from .projections.baselines import EP_COVERAGE_THRESHOLD, ep_coverage
 from .rules import archive_season_rules
@@ -200,6 +210,167 @@ def project(
             "deferred to FPL's published expected points.[/yellow]"
         )
     _print_notes(loaded)
+
+
+@app.command()
+def backtest(
+    season: str = typer.Argument(..., help="e.g. 2024-25, or 'all'"),
+    strategy: str = typer.Option("all", "--strategy", "-s", help="or 'all'"),
+    gw_from: int | None = typer.Option(None, "--from", help="first gameweek"),
+    gw_to: int | None = typer.Option(None, "--to", help="last gameweek"),
+    out: Path | None = typer.Option(None, "--out", help="where to write results"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Walk forward through a season, deciding before each gameweek.
+
+    Writes one CSV per season and strategy, plus a summary JSON that
+    ``fpl table`` turns into the README's results table.
+    """
+    _verbose(verbose)
+    config = Config()
+    results_dir = out or config.results_dir
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    seasons = list(available_seasons()) if season == "all" else [season]
+    strategies = sorted(STRATEGIES) if strategy == "all" else [strategy]
+    for name in strategies:
+        if name not in STRATEGIES:
+            raise typer.BadParameter(
+                f"unknown strategy {name!r}: choose from {sorted(STRATEGIES)}"
+            )
+
+    results: list[BacktestResult] = []
+    for season_name in seasons:
+        loaded = load_season(season_name)
+        rule_set = archive_season_rules(season_name)
+        # One feature cache per season, shared by every strategy that wants it.
+        cache = FeatureCache(loaded, form_window=config.form_window)
+        coverage, _ = ep_coverage(loaded)
+
+        for name in strategies:
+            if name == "ep" and coverage < EP_COVERAGE_THRESHOLD:
+                console.print(
+                    f"[yellow]{season_name} {name}: skipped — FPL expected points "
+                    f"cover {coverage:.0%} of gameweeks, below the "
+                    f"{EP_COVERAGE_THRESHOLD:.0%} threshold.[/yellow]"
+                )
+                continue
+            with console.status(f"{season_name} {name}…"):
+                result = run_backtest(
+                    loaded,
+                    name,
+                    rule_set,
+                    config=config,
+                    start_gw=gw_from,
+                    end_gw=gw_to,
+                    cache=cache,
+                )
+            if not result.records:
+                console.print(
+                    f"[yellow]{season_name} {name}: no gameweeks decided.[/yellow]"
+                )
+                continue
+            results.append(result)
+            path = results_dir / f"{season_name}-{name}.csv"
+            result.frame().to_csv(path, index=False)
+            console.print(
+                f"{season_name} [bold]{name}[/bold]: {result.total_points} points "
+                f"over {result.gameweeks} gameweeks "
+                f"({len(result.decided_gws)} decided) → {path.name}"
+            )
+
+    if not results:
+        console.print("[yellow]Nothing to report.[/yellow]")
+        raise typer.Exit(code=0)
+
+    table = compare(results)
+    summary_path = results_dir / "summary.json"
+    summary_path.write_text(
+        json.dumps([r.summary() for r in results], indent=2) + "\n"
+    )
+
+    columns = (
+        "season",
+        "strategy",
+        "gameweeks",
+        "decided",
+        "total_points",
+        "window_gws",
+        "window_points",
+        "per_gw",
+        "transfers",
+        "hits",
+        "vs_naive",
+    )
+    display = Table(title="backtest")
+    for column in columns:
+        display.add_column(
+            column, justify="right" if column != "strategy" else "left"
+        )
+    for row in table.to_dict("records"):
+        display.add_row(
+            *["—" if row[c] is None else str(row[c]) for c in columns]
+        )
+    console.print(display)
+    console.print(f"\nSummary written to {summary_path}")
+
+
+@app.command()
+def table(
+    results_dir: Path | None = typer.Option(None, "--results", help="results dir"),
+) -> None:
+    """Print the results table as Markdown, for pasting into the README."""
+    config = Config()
+    path = (results_dir or config.results_dir) / "summary.json"
+    if not path.exists():
+        raise typer.BadParameter(
+            f"no summary at {path}: run `fpl backtest all` first"
+        )
+    summaries = json.loads(path.read_text())
+
+    # The window is the gameweeks every strategy in a season scored, so the
+    # comparison has one denominator. Strategies start in different gameweeks.
+    windows: dict[str, set[int]] = {}
+    for entry in summaries:
+        scored = set(entry["scored_gameweeks"])
+        windows[entry["season"]] = (
+            scored
+            if entry["season"] not in windows
+            else windows[entry["season"]] & scored
+        )
+
+    lines = [
+        "| Season | Strategy | Gameweeks decided | Points in common window | "
+        "vs `naive` |",
+        "|---|---|---|---|---|",
+    ]
+    rows = []
+    for entry in summaries:
+        window = windows[entry["season"]]
+        path_csv = (results_dir or config.results_dir) / (
+            f"{entry['season']}-{entry['strategy']}.csv"
+        )
+        frame = pd.read_csv(path_csv)
+        window_points = int(frame.loc[frame["gw"].isin(window), "points"].sum())
+        rows.append((entry, window, window_points))
+
+    baselines = {
+        entry["season"]: points
+        for entry, _, points in rows
+        if entry["strategy"] == "naive"
+    }
+    for entry, window, window_points in rows:
+        baseline = baselines.get(entry["season"])
+        if entry["strategy"] == "naive" or baseline is None:
+            delta = "—"
+        else:
+            delta = f"{window_points - baseline:+d}"
+        decided = f"{entry['decided_gameweeks']} of {entry['gameweeks']}"
+        lines.append(
+            f"| {entry['season']} | `{entry['strategy']}` | {decided} | "
+            f"{window_points} over {len(window)} GWs | {delta} |"
+        )
+    print("\n".join(lines))
 
 
 def main() -> None:
