@@ -16,11 +16,10 @@ on:
     - cron: "0 */4 * * *"
   workflow_dispatch:
     inputs:
-      strategy:
-        description: "projection strategy"
-        default: model
-        type: choice
-        options: [model, ep, naive]
+      strategies:
+        description: "comma-separated projection strategies"
+        default: model,naive
+        type: string
       dry_run:
         description: "decide without writing or committing"
         default: false
@@ -41,7 +40,9 @@ jobs:
     timeout-minutes: 45
     outputs:
       recorded: ${{ steps.summary.outputs.recorded }}
+      snapshot: ${{ steps.summary.outputs.snapshot }}
       scored: ${{ steps.summary.outputs.scored }}
+      outcomes: ${{ steps.summary.outputs.outcomes }}
       missed: ${{ steps.summary.outputs.missed }}
       next_gw: ${{ steps.summary.outputs.next_gw }}
       next_deadline: ${{ steps.summary.outputs.next_deadline }}
@@ -61,10 +62,10 @@ jobs:
       - name: Track
         id: track
         env:
-          STRATEGY: ${{ inputs.strategy || 'model' }}
+          STRATEGIES: ${{ inputs.strategies || 'model,naive' }}
           DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
         run: |
-          fpl track --strategy "$STRATEGY" $DRY_RUN --status-file status.json
+          fpl track --strategies "$STRATEGIES" $DRY_RUN --status-file status.json
           echo '--- status.json ---'
           cat status.json
 
@@ -75,9 +76,15 @@ jobs:
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json, pathlib
           s = json.loads(pathlib.Path("status.json").read_text())
-          print(f"recorded={s.get('recorded_gw') or ''}")
-          print(f"scored={','.join(str(g) for g in s.get('scored_gws') or [])}")
-          print(f"missed={','.join(str(g) for g in s.get('missed_gws') or [])}")
+
+          def joined(key):
+              return ",".join(str(v) for v in s.get(key) or [])
+
+          print(f"recorded={joined('recorded')}")
+          print(f"snapshot={s.get('snapshot') or ''}")
+          print(f"scored={joined('scored')}")
+          print(f"outcomes={joined('outcomes')}")
+          print(f"missed={joined('missed')}")
           print(f"next_gw={s.get('next_gw') or ''}")
           print(f"next_deadline={s.get('next_deadline') or ''}")
           PY

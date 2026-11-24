@@ -78,7 +78,7 @@ to the projections rather than to the plumbing.
 | Strategy | What it is |
 |---|---|
 | `model` | A three-part generalized linear model in JAX. Most of the variance in an FPL score is *whether the player played*, so rather than spend one regression's capacity blending the regimes it fits P(60 minutes), P(cameo) and Poisson points within each, then multiplies. Every head is linear, so the fitted model explains itself. |
-| `ep` | FPL's own published expected points. Fits nothing — it is a read of someone else's number, which was meant to make it the fair middle baseline. On the archive it is not one: the column turns out to know who played. See **Why `ep` is not in the table**. |
+| `ep` | FPL's own published expected points. Fits nothing — a read of someone else's number, which was meant to make it the fair middle baseline. On the archive it is not usable as one: the column tracks realized minutes closely enough to score past any human. See **Why `ep` is not in the table**. |
 | `naive` | Points per fixture so far, carried forward. What a manager does by eye; beating it is the minimum bar. |
 
 `model` and `naive` are per *fixture*, so a double gameweek is worth two
@@ -183,18 +183,33 @@ a reason to check the column rather than publish the finding. Checking it:
 
 *(2023-24; 2024-25 and 2025-26 measure 64–65% the same way.)*
 
-A pre-deadline forecast cannot do that. FPL quotes an `ep_next` for every
-registered player before every deadline, including the nailed starter who turns
-out to be a surprise omission — so a forecast's ratings for players who went on
-to play nothing should look much like its ratings for everyone else. Two thirds
-of them being *exactly* zero means the value was written down after the team
-sheets were known.
+Whether a *forecast* could be that clean is the question. Restricting to
+players who started each of the three previous gameweeks — so no forecast could
+know they were about to be dropped — 31% of those who then played nothing were
+rated exactly 0.0, against 0.3% of those who played an hour.
 
-That matters more than it might sound, because whether a player starts is most
-of the variance in an FPL score. A strategy reading this column is not
-forecasting playing time, it is being told it. So its total measures what the
-information is worth, not what the strategy is — and it cannot be set against
-strategies that had to guess.
+That is suspicious but not proof, and it is worth being exact about why:
+pre-deadline injury and suspension news explains a good deal of it. A nailed
+starter ruled out on the Friday *should* carry an expected-points figure near
+zero, and around ninety such cases a season is roughly two per gameweek across
+twenty clubs — entirely ordinary.
+
+So the honest position is two-part:
+
+- **The conclusion is solid.** Whatever the mechanism, a strategy reading this
+  column scores 84–88 points a gameweek, and no manager among ten million does.
+  A baseline that beats the world record by a fifth is not measuring its own
+  skill, and cannot be set against strategies that had to guess.
+- **The mechanism is probable, not proven.** "Recorded after the fact" fits the
+  numbers, but so does "a forecast with good injury news". The statistic alone
+  does not separate them.
+
+What settles it is a genuinely pre-deadline snapshot of the same column,
+compared against what then happened — which is why `fpl track` now freezes
+FPL's published figure for every player each week (see **Live record**). After
+a few gameweeks the same statistic can be computed on data that is
+*definitionally* a forecast, and the comparison answers the question rather
+than arguing about it.
 
 Three consequences, all of them in the code rather than only here:
 
@@ -243,9 +258,36 @@ fpl track                 # score what is on record, then call the next gameweek
 fpl track --dry-run       # see the recommendation without recording it
 ```
 
-The per-gameweek rows live in `results/live/`: one JSON recommendation per
-gameweek alongside the scored CSV, so every row traces back to the squad and
-the timestamp it came from.
+### What a gameweek's record contains
+
+Everything in the first group is captured at the same moment, before the
+deadline, and never rewritten:
+
+| File | What it is |
+|---|---|
+| `{season}-gw{NN}-model.json` | the squad the model picked, with the timestamp and the deadline it was picked against |
+| `{season}-gw{NN}-naive.json` | the same for the naive baseline, so the live record compares the two the backtest compares |
+| `{season}-gw{NN}-published-ep.csv` | FPL's own published expected points for **every player**, with price, position and what FPL thought of their fitness |
+
+And after the gameweek is played:
+
+| File | What it is |
+|---|---|
+| `{season}-gw{NN}-outcomes.csv` | realized points and minutes for every player, summed across both legs of a double |
+| `{season}.csv` | one row per gameweek per strategy: what the squad scored, and the average of every team entered worldwide |
+
+The snapshot of FPL's published figure is the interesting one, and it exists
+because of what **Known gaps** could not settle. The archive's version of that
+column was written down after the season; this is the same field read *before*
+the deadline, when it is unambiguously a forecast. Frozen weekly, it becomes
+the thing the archive should have been — and the only way to find out how good
+FPL's own number actually is. It costs no extra requests: `ep_next` arrives in
+the same payload the planning step already fetches.
+
+Because the snapshot carries prices, positions and clubs as well, a squad can
+be derived from it retrospectively and stay honest — every input in the file
+was published before the deadline. That is precisely the promise the archive's
+column could not make.
 
 **This runs itself.** [`.github/workflows/track.yml`](.github/workflows/track.yml)
 runs `fpl track` every four hours and commits any new record back to `main`.
@@ -274,22 +316,21 @@ than six new issues a day.
 These are properties of the available data, not of the code, and they constrain
 what the results table can honestly claim.
 
-- **The archive's `xP` column already knows who played, so it is not a
-  baseline.** This was meant to be the fair comparison — FPL's own number,
-  nothing fitted. It is not one. Across all three seasons, **64–66% of
-  player-gameweeks with zero minutes are rated exactly 0.0**, against 1.3% of
-  the player-gameweeks where someone played an hour or more. A pre-deadline
-  forecast cannot do that: FPL quotes an `ep_next` for every registered player,
-  including the nailed starter who turns out to be a surprise omission. The
-  column has been recorded after the fact.
+- **The archive's `xP` column tracks realized minutes too closely to be used
+  as a baseline.** This was meant to be the fair comparison — FPL's own number,
+  nothing fitted. Across all three seasons, **64–66% of player-gameweeks with
+  zero minutes are rated exactly 0.0**, against 1.3% of those where someone
+  played an hour or more; restricted to established starters who were then
+  dropped, 31% against 0.3%.
 
-  Since playing time is most of the variance in an FPL score, a strategy
-  reading it is being told the answer rather than forecasting it — which is why
-  it "scores" 84–88 points a gameweek, well past any human. `fpl data` says so
-  in the season notes, `ep_looks_like_hindsight` measures it, and the model
-  refuses to use it as a fallback. It is excluded from the results table for
-  the same reason the average-manager row is: a number that cannot mean what it
-  appears to mean is worse than no number.
+  Whether that is hindsight or a forecast with good injury news, the statistic
+  alone cannot say — see **Why `ep` is not in the table** for the argument and
+  for the test now running. What is not in doubt is the consequence: a strategy
+  reading the column scores 84–88 points a gameweek against a human record
+  nearer 71, so it is excluded from the results table, for the same reason the
+  average-manager row is. `fpl data` reports the figure in the season notes,
+  `ep_looks_like_hindsight` measures it, and the model declines to use the
+  column as a fallback.
 
 - **FPL's published expected points are also patchy.** In 2025-26, 27 of 38
   gameweeks record `xP` as 0.0 for *every* player — a failed collection rather

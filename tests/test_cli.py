@@ -11,6 +11,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pandas as pd
+
 import pytest
 from typer.testing import CliRunner
 
@@ -219,7 +221,7 @@ def test_table_prints_markdown_with_the_window_stated(hand_built, tmp_path):
     assert any("GWs" in l for l in lines)
 
 
-def test_table_omits_a_strategy_that_knows_who_played(monkeypatch, tmp_path):
+def test_table_omits_a_strategy_whose_total_is_not_comparable(monkeypatch, tmp_path):
     """`ep` is left out of the comparison, with the reason printed.
 
     Putting it in a table of results implies it is a baseline. It is not: the
@@ -247,7 +249,7 @@ def test_table_omits_a_strategy_that_knows_who_played(monkeypatch, tmp_path):
     table_rows = [l for l in result.stdout.splitlines() if l.startswith("| 2")]
     assert not any("`ep`" in row for row in table_rows)
     assert "omitted" in result.stdout
-    assert "knows who played" in result.stdout
+    assert "not a comparable result" in result.stdout
 
 
 def test_table_without_a_backtest_says_what_to_run(tmp_path):
@@ -268,7 +270,7 @@ def live(monkeypatch, tmp_path):
     command's logic — record, score, refuse — without a request.
     """
     from fpl_optimizer.rules import archive_season_rules
-    from .fixtures.handbuilt import hand_built_season
+    from .fixtures.handbuilt import CLUBS, PLAYERS, hand_built_season
 
     data = hand_built_season()
     events = data.events.copy()
@@ -297,8 +299,53 @@ def live(monkeypatch, tmp_path):
             }
             for row in data.events.to_dict("records")
         ],
-        "elements": [{"id": pid} for pid in data.player_gws["player_id"].unique()],
+        # Elements as the API serves them, because the snapshot reads the
+        # published expected points and prices straight out of this payload.
+        "element_types": [
+            {"id": 1, "singular_name_short": "GKP"},
+            {"id": 2, "singular_name_short": "DEF"},
+            {"id": 3, "singular_name_short": "MID"},
+            {"id": 4, "singular_name_short": "FWD"},
+        ],
+        "teams": [
+            {"id": i + 1, "name": club, "short_name": short}
+            for i, (club, short) in enumerate(CLUBS.items())
+        ],
+        "elements": [
+            {
+                "id": pid,
+                "web_name": name,
+                "element_type": {"GKP": 1, "DEF": 2, "MID": 3, "FWD": 4}[position],
+                "team": list(CLUBS).index(club) + 1,
+                "now_cost": price,
+                "ep_next": "4.0",
+                "status": "a",
+                "chance_of_playing_next_round": 100,
+            }
+            for pid, (name, position, club, price) in PLAYERS.items()
+        ],
     }
+
+    def event_live_for(gw):
+        """`event/{gw}/live` as the API serves it, from the season's results.
+
+        One request carries every player's gameweek totals, already summed
+        across both fixtures of a double — which is what the scorer wants.
+        """
+        totals = data.at(gw).groupby("player_id")[["points", "minutes", "starts"]].sum()
+        return {
+            "elements": [
+                {
+                    "id": int(pid),
+                    "stats": {
+                        "total_points": int(row["points"]),
+                        "minutes": int(row["minutes"]),
+                        "starts": int(row["starts"]),
+                    },
+                }
+                for pid, row in totals.iterrows()
+            ]
+        }
 
     class StubClient:
         def __init__(self, *a, **k):
@@ -309,6 +356,9 @@ def live(monkeypatch, tmp_path):
 
         def fixtures(self):
             return []
+
+        def event_live(self, gw):
+            return event_live_for(int(gw))
 
     monkeypatch.setattr(cli, "FPLClient", StubClient)
     monkeypatch.setattr(cli, "load_live_season", lambda *a, **k: data)
@@ -330,7 +380,7 @@ def live(monkeypatch, tmp_path):
 
 def test_track_records_the_upcoming_gameweek(live):
     results_dir = live.results_dir
-    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
 
     assert result.exit_code == 0, result.output
     written = list((results_dir / "live").glob("*-gw03-ep.json"))
@@ -347,7 +397,7 @@ def test_track_scores_nothing_on_its_first_run(live):
     The first run records — that is something to do — but it cannot score any
     of the gameweeks already played, because nobody called them in advance.
     """
-    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
 
     assert result.exit_code == 0
     assert "recommended XI scored" not in result.stdout
@@ -356,8 +406,8 @@ def test_track_scores_nothing_on_its_first_run(live):
 
 def test_track_does_nothing_once_the_gameweek_is_on_record(live):
     """The idempotent case, which is what a four-hourly schedule mostly hits."""
-    runner.invoke(cli.app, ["track", "--strategy", "ep"])
-    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    runner.invoke(cli.app, ["track", "--strategies", "ep"])
+    result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
 
     assert result.exit_code == 0
     assert "Nothing to do" in result.stdout
@@ -371,7 +421,7 @@ def test_track_refuses_to_record_once_the_deadline_has_passed(live):
         if event["id"] == 3:
             event["deadline_time"] = "2024-09-03T11:30:00Z"
 
-    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
     assert result.exit_code == 0
     assert "deadline has passed" in result.stdout
     assert not list((results_dir / "live").glob("*-gw03-*.json"))
@@ -380,30 +430,32 @@ def test_track_refuses_to_record_once_the_deadline_has_passed(live):
 def test_track_writes_a_status_file_for_automation(live, tmp_path):
     status = tmp_path / "status.json"
     result = runner.invoke(
-        cli.app, ["track", "--strategy", "ep", "--status-file", str(status)]
+        cli.app, ["track", "--strategies", "ep", "--status-file", str(status)]
     )
 
     assert result.exit_code == 0
     payload = json.loads(status.read_text())
-    assert payload["recorded_gw"] == 3
-    assert payload["scored_gws"] == []
-    assert payload["missed_gws"] == []
+    assert payload["recorded"] == ["ep"]
+    assert payload["snapshot"] == 3
+    assert payload["scored"] == []
+    assert payload["outcomes"] == []
+    assert payload["missed"] == []
     assert payload["next_gw"] == 3
     assert payload["api_players"] == 18
 
 
 def test_track_will_not_overwrite_a_recommendation_already_on_record(live):
-    first = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    first = runner.invoke(cli.app, ["track", "--strategies", "ep"])
     assert "Recorded GW3" in first.stdout
 
-    second = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    second = runner.invoke(cli.app, ["track", "--strategies", "ep"])
     assert second.exit_code == 0
     assert "already on record" in second.stdout
 
 
 def test_track_dry_run_decides_but_writes_nothing(live):
     results_dir = live.results_dir
-    result = runner.invoke(cli.app, ["track", "--strategy", "ep", "--dry-run"])
+    result = runner.invoke(cli.app, ["track", "--strategies", "ep", "--dry-run"])
 
     assert result.exit_code == 0
     assert "GW3 recommendation" in result.stdout
@@ -427,14 +479,25 @@ def test_track_scores_a_gameweek_that_was_called_in_advance(live):
     )
     record(rec, config)
 
-    result = runner.invoke(cli.app, ["track", "--strategy", "ep"])
+    result = runner.invoke(cli.app, ["track", "--strategies", "ep"])
     assert result.exit_code == 0, result.output
-    assert "recommended XI scored" in result.stdout
+    assert "GW2 ep: scored" in result.stdout
     assert "average manager 70" in result.stdout
     assert (results_dir / "live" / "2024-25.csv").exists()
 
+    # The table gains its first row, with the gap to the average manager.
+    scored = pd.read_csv(results_dir / "live" / "2024-25.csv")
+    assert list(scored["gw"]) == [2]
+    assert float(scored.iloc[0]["average_entry_score"]) == 70.0
+    assert scored.iloc[0]["delta"] == scored.iloc[0]["points"] - 70.0
+
+    # ...and every player's realized points are written beside the snapshot.
+    outcomes = pd.read_csv(results_dir / "live" / "2024-25-gw02-outcomes.csv")
+    assert len(outcomes) == 18
+    assert set(outcomes.columns) == {"player_id", "points", "minutes", "starts"}
+
 
 def test_track_rejects_an_unknown_strategy(live):
-    result = runner.invoke(cli.app, ["track", "--strategy", "vibes"])
+    result = runner.invoke(cli.app, ["track", "--strategies", "vibes"])
     assert result.exit_code != 0
     assert "unknown strategy" in result.stderr
