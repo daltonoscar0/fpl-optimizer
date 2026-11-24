@@ -23,7 +23,11 @@ from fpl_optimizer.projections import (
     aggregate_to_gw,
     empty_predictions,
 )
-from fpl_optimizer.projections.baselines import EP_COVERAGE_THRESHOLD, ep_coverage
+from fpl_optimizer.projections.baselines import (
+    EP_COVERAGE_THRESHOLD,
+    MIN_RATE_FIXTURES,
+    ep_coverage,
+)
 
 from .fixtures import BLANK_GW, DOUBLE_GW, corrupt_outcomes, make_season
 
@@ -228,6 +232,51 @@ def test_naive_values_a_double_gameweek_at_two_fixtures(season):
     for pid in doubled:
         rate = float(hist.loc[pid, "sum"]) / int(hist.loc[pid, "size"])
         assert preds.loc[pid] == pytest.approx(2 * rate)
+
+
+def test_a_single_appearance_haul_does_not_top_the_ranking():
+    """One good afternoon is not a rate.
+
+    A player signed late plays once, scores 12, and has one fixture of history.
+    Unfloored that is 12 points per fixture and he is the best player in the
+    league by a factor of nearly three; floored at three fixtures he is 4.0,
+    which puts him behind the players who have actually been doing it.
+    """
+    data = make_season(n_gws=8)
+    df = data.player_gws.copy()
+    hauler = int(df["player_id"].max())
+
+    # Arrived in gameweek 7: no rows before it, one fixture played, 12 points.
+    df = df[(df["player_id"] != hauler) | (df["gw"] >= 7)].copy()
+    gw7 = (df["player_id"] == hauler) & (df["gw"] == 7)
+    df.loc[gw7, ["minutes", "points"]] = [90, 12]
+    data.player_gws = df.reset_index(drop=True)
+
+    proj = NaiveProjection()
+    proj.fit(data, 8)
+    assert proj._ppf[hauler] == pytest.approx(12 / MIN_RATE_FIXTURES)
+
+    preds = proj.predict(data, 8).set_index("player_id")["xpts"]
+    assert preds.idxmax() != hauler
+    # Without the floor he would have been rated 12.0 and topped it outright.
+    assert 12.0 > preds.max()
+    assert (preds > preds.loc[hauler]).sum() >= 2
+
+
+def test_the_floor_does_not_touch_players_with_enough_history(season):
+    """It binds only below the threshold, so established players are unaffected."""
+    proj = NaiveProjection()
+    proj.fit(season, 8)
+    hist = season.before(8)
+    counts = hist.groupby("player_id").size()
+    established = counts[counts >= MIN_RATE_FIXTURES].index
+    totals = hist.groupby("player_id")["points"].sum()
+
+    assert len(established) > 0
+    for pid in established:
+        assert proj._ppf[pid] == pytest.approx(
+            float(totals[pid]) / int(counts[pid])
+        )
 
 
 def test_naive_rates_a_player_with_no_history_at_zero(season):

@@ -79,6 +79,20 @@ def ep_coverage(data: SeasonData) -> tuple[float, list[int]]:
     return 1.0 - len(missing) / len(gws), missing
 
 
+#: Fixtures of exposure a player must have before their points-per-fixture rate
+#: is taken at face value. Below this the denominator is floored, so a player
+#: who has appeared once and hauled is rated on his total rather than on a rate
+#: extrapolated from a single match.
+#:
+#: This is the same move as the one-full-match floor on ``points_per_90`` in
+#: :mod:`fpl_optimizer.features`, but the floor has to be more than one fixture
+#: to do anything. ``points_per_90`` divides by minutes, so flooring at 90
+#: bounds a sub-match sample; here the unit of the denominator already *is* the
+#: match, and flooring at one fixture would leave a single-appearance haul
+#: reporting itself unchanged. Three fixtures is about a month of football.
+MIN_RATE_FIXTURES = 3
+
+
 @dataclass
 class NaiveProjection:
     """Points per fixture so far, carried forward unchanged.
@@ -88,6 +102,9 @@ class NaiveProjection:
     FPL's ``xP`` and the model both predict a fixture at a time. A per-gameweek
     rate would hand this strategy a different view of doubles than its rivals,
     and the backtest would be comparing two things at once.
+
+    The denominator is floored at :data:`MIN_RATE_FIXTURES` so a player with
+    almost no history cannot top the ranking on one good afternoon.
     """
 
     name: str = "naive"
@@ -104,7 +121,7 @@ class NaiveProjection:
         # the behaviour wanted from a baseline this crude.
         agg = hist.groupby("player_id")["points"].agg(["sum", "size"])
         self._ppf = {
-            int(pid): float(r["sum"]) / max(int(r["size"]), 1)
+            int(pid): float(r["sum"]) / max(int(r["size"]), MIN_RATE_FIXTURES)
             for pid, r in agg.iterrows()
         }
 

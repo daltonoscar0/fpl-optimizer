@@ -222,15 +222,18 @@ def test_fpl_expected_points_adds_both_legs(season):
 def test_naive_rate_is_per_fixture_and_so_doubles(season):
     """After gameweek 1, each player has played exactly one fixture.
 
-    So their points-per-fixture is their gameweek-1 score — 2, 6, 1 and 9 — and
-    a two-fixture gameweek is worth twice that.
+    One fixture is below ``MIN_RATE_FIXTURES``, so the denominator is floored at
+    three and the gameweek-1 scores of 2, 6, 1 and 9 become rates of 2/3, 2, 1/3
+    and 3. A two-fixture gameweek is then worth exactly twice each rate, which
+    is the property under test — the floor changes the level, not the scaling.
     """
     proj = NaiveProjection()
     proj.fit(season, 2)
-    assert proj._ppf == pytest.approx({1: 2.0, 2: 6.0, 3: 1.0, 4: 9.0})
+    rates = {1: 2 / 3, 2: 6 / 3, 3: 1 / 3, 4: 9 / 3}
+    assert proj._ppf == pytest.approx(rates)
 
     preds = proj.predict(season, 2).set_index("player_id")["xpts"]
-    assert preds.to_dict() == pytest.approx({1: 4.0, 2: 12.0, 3: 2.0, 4: 18.0})
+    assert preds.to_dict() == pytest.approx({p: 2 * r for p, r in rates.items()})
 
 
 def test_naive_divides_by_fixtures_not_gameweeks(season):
