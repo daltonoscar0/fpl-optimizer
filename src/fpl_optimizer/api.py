@@ -35,6 +35,7 @@ ENDPOINTS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^fixtures/$"),
     re.compile(r"^fixtures/\?event=\d+$"),
     re.compile(r"^element-summary/\d+/$"),
+    re.compile(r"^event/\d+/live/$"),
     re.compile(r"^entry/\d+/$"),
     re.compile(r"^entry/\d+/history/$"),
     re.compile(r"^entry/\d+/event/\d+/picks/$"),
@@ -119,6 +120,16 @@ class FPLClient:
     def element_summary(self, player_id: int) -> dict[str, Any]:
         """One player's per-gameweek history this season and future fixtures."""
         return self.get(f"element-summary/{int(player_id)}/")
+
+    def event_live(self, event: int) -> dict[str, Any]:
+        """Every player's realized stats for one gameweek, in one request.
+
+        The same figures ``element-summary`` carries per player, which would be
+        one request each — six hundred and seventy-four of them for a single
+        gameweek's results. Points are already summed across a double
+        gameweek's fixtures here, which is what the scorer wants.
+        """
+        return self.get(f"event/{int(event)}/live/")
 
     def entry(self, team_id: int) -> dict[str, Any]:
         """A manager's public entry summary (name, bank, squad value, chips)."""

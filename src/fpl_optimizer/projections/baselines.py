@@ -105,14 +105,21 @@ def ep_looks_like_hindsight(data: SeasonData) -> tuple[float, float]:
 
     In the archive they do not. Measured over 2023-24 and 2024-25, two thirds
     of player-gameweeks with zero minutes carry ``xP`` of exactly 0.0, against
-    1.3% of the player-gameweeks where someone played an hour or more. The
-    column has been recorded after the fact, or recomputed, and it encodes
-    realized minutes.
+    1.3% of the player-gameweeks where someone played an hour or more. Narrowed
+    to players who had started each of the three previous gameweeks — whom no
+    forecast could know were about to be dropped — it is 31% against 0.3%.
 
-    That matters because minutes are most of the variance in an FPL score. A
-    strategy reading this column is not forecasting, it is being told who
-    played — which is why its backtested total is not comparable to one from a
-    strategy that had to guess.
+    What that proves is weaker than it first looks, and worth stating exactly:
+    pre-deadline injury and suspension news would produce much of the same
+    pattern, since a starter ruled out on the Friday genuinely has an expected
+    return near zero. This statistic cannot separate "recorded after the fact"
+    from "a forecast with good team news".
+
+    What it does establish is that the column tracks realized minutes closely
+    enough that a strategy following it scores past any human manager, and so
+    its total cannot be set beside strategies that had to guess. The question
+    of mechanism is settled by a genuinely pre-deadline snapshot of the same
+    field, which :mod:`fpl_optimizer.track` now collects weekly.
     """
     frame = data.player_gws[["minutes", "ep"]]
     minutes = pd.to_numeric(frame["minutes"], errors="coerce").fillna(0)

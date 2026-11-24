@@ -117,6 +117,90 @@ def _events_frame(bootstrap: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("gw").reset_index(drop=True)
 
 
+def season_from_event_live(
+    bootstrap: dict[str, Any],
+    event_live: dict[str, Any],
+    gw: int,
+) -> SeasonData:
+    """One gameweek of realized results, in two requests rather than 674.
+
+    ``event/{gw}/live`` carries every player's figures for a gameweek, already
+    summed across both fixtures of a double. Paired with ``bootstrap-static``
+    for identity, price and position, that is everything needed to score a
+    squad — where going through ``element-summary`` would mean a request per
+    player for the same numbers.
+
+    It normalizes into :class:`~fpl_optimizer.schema.SeasonData` like every
+    other source rather than being handed to the scorer directly. The point of
+    having one schema is that a new way of reading the game does not get its
+    own private path to a decision.
+
+    The frame holds exactly one gameweek, so it is for scoring a gameweek
+    already played and nothing else: there is no history in it to fit on.
+    """
+    season = current_season(bootstrap)
+    clubs = _clubs_frame(bootstrap, season)
+    id_to_name = dict(zip(clubs["club_id"], clubs["club"]))
+    id_to_short = dict(zip(clubs["club_id"], clubs["club_short"]))
+
+    stats = {
+        int(e["id"]): (e.get("stats") or {}) for e in event_live.get("elements") or []
+    }
+    rows: list[dict[str, Any]] = []
+    for element in bootstrap["elements"]:
+        position = normalize_position(
+            _position_code(bootstrap, element["element_type"])
+        )
+        if position is None:
+            continue
+        pid = int(element["id"])
+        stat = stats.get(pid, {})
+        club_id = int(element["team"])
+        rows.append(
+            {
+                "season": season,
+                "gw": gw,
+                "player_id": pid,
+                "name": _display_name(element),
+                "position": position,
+                "club": id_to_name.get(club_id),
+                "club_short": id_to_short.get(club_id),
+                # The opponent is per fixture, and this frame is per gameweek;
+                # scoring never reads it.
+                "opponent": None,
+                "opponent_short": None,
+                "was_home": None,
+                "price": int(element["now_cost"]),
+                "fixture_id": pd.NA,
+                "kickoff_time": None,
+                "ep": _to_float(element.get("ep_next")),
+                "availability": _availability(element),
+                "points": stat.get("total_points"),
+                **{
+                    column: stat.get(column)
+                    for column in _HISTORY_OUTCOMES
+                    if column in stat
+                },
+            }
+        )
+
+    player_gws = coerce_player_gws(pd.DataFrame(rows)).sort_values(
+        ["gw", "player_id"], kind="stable"
+    )
+    return SeasonData(
+        season=season,
+        player_gws=player_gws.reset_index(drop=True),
+        clubs=clubs,
+        fixtures=_fixtures_frame([], season, id_to_name),
+        events=_events_frame(bootstrap),
+        source="live",
+        notes=[
+            f"one gameweek (GW{gw}) of realized results from `event/{gw}/live`, "
+            f"for scoring only: there is no history in this frame to fit on"
+        ],
+    )
+
+
 def events_from_bootstrap(bootstrap: dict[str, Any]) -> pd.DataFrame:
     """Per-gameweek metadata — deadlines, finished flags, average scores.
 

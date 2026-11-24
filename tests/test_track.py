@@ -24,7 +24,15 @@ from fpl_optimizer.config import Config
 from fpl_optimizer.rules import archive_season_rules
 from fpl_optimizer.track import (
     NotRecordedInAdvance,
+    PLAYER_OUTCOME_COLUMNS,
+    SNAPSHOT_COLUMNS,
+    _parse,
+    load_snapshot,
+    outcomes_from,
     plan_track,
+    snapshot_from_bootstrap,
+    write_outcomes,
+    write_snapshot,
     Recommendation,
     append_tracked,
     deadline_for,
@@ -39,7 +47,7 @@ from fpl_optimizer.track import (
     tracking_path,
 )
 
-from .fixtures.handbuilt import hand_built_season
+from .fixtures.handbuilt import DOUBLE_GW, hand_built_season
 
 #: The hand-built season's gameweek deadlines are 2024-09-0{gw}T11:30:00Z.
 BEFORE_GW2 = "2024-09-01T09:00:00+00:00"
@@ -319,13 +327,17 @@ AFTER_12 = "2026-11-28T09:00:00Z"
 
 
 def _plan(**kwargs):
+    """A single-strategy plan, so one assertion tests one thing."""
     base = dict(
         season="2026-27",
         events=EVENTS,
-        recorded_gws=set(),
-        scored_gws=set(),
+        recorded={"model": set()},
+        scored=set(),
+        snapshot_gws=set(),
+        outcome_gws=set(),
         next_gw=12,
         now=BEFORE_12,
+        strategies=("model",),
     )
     return plan_track(**{**base, **kwargs})
 
@@ -333,26 +345,52 @@ def _plan(**kwargs):
 def test_a_run_before_the_deadline_records_the_next_gameweek():
     plan = _plan()
 
-    assert plan.record_gw == 12
+    assert plan.record_strategies == ["model"]
+    assert plan.record_snapshot
     assert plan.next_deadline == "2026-11-27T18:30:00Z"
     assert plan.needs_full_season
     assert not plan.nothing_to_do
 
 
-def test_a_run_once_the_gameweek_is_on_record_does_nothing():
+def test_a_run_once_everything_is_on_record_does_nothing():
     """The case a four-hourly schedule hits almost every time."""
-    plan = _plan(recorded_gws={12})
+    plan = _plan(recorded={"model": {12}}, snapshot_gws={12})
 
-    assert plan.record_gw is None
+    assert plan.record_strategies == []
+    assert not plan.record_snapshot
     assert plan.nothing_to_do
     assert "already on record" in plan.reason
     assert not plan.needs_full_season
+    assert not plan.needs_results
+
+
+def test_a_missing_strategy_is_recorded_without_redoing_the_others():
+    """Adding a second strategy mid-season backfills only what is missing."""
+    plan = _plan(
+        recorded={"model": {12}, "naive": set()},
+        snapshot_gws={12},
+        strategies=("model", "naive"),
+    )
+
+    assert plan.record_strategies == ["naive"]
+    assert not plan.record_snapshot
+
+
+def test_the_snapshot_alone_does_not_need_every_players_history():
+    """It comes out of the bootstrap payload, which is already in hand."""
+    plan = _plan(recorded={"model": {12}}, snapshot_gws=set())
+
+    assert plan.record_strategies == []
+    assert plan.record_snapshot
+    assert not plan.needs_full_season
+    assert not plan.nothing_to_do
 
 
 def test_a_run_after_the_deadline_records_nothing():
     plan = _plan(now=AFTER_12, next_gw=12)
 
-    assert plan.record_gw is None
+    assert plan.record_strategies == []
+    assert not plan.record_snapshot
     assert "deadline has passed" in plan.reason
 
 
@@ -360,22 +398,21 @@ def test_a_run_exactly_on_the_deadline_records_nothing():
     """The boundary belongs to the deadline, not to the optimizer."""
     plan = _plan(now="2026-11-27T18:30:00Z")
 
-    assert plan.record_gw is None
+    assert plan.record_strategies == []
     assert "deadline has passed" in plan.reason
 
 
 def test_a_gameweek_with_no_published_deadline_is_not_recorded():
-    events = _events([(12, None, False)])
-    plan = _plan(events=events)
+    plan = _plan(events=_events([(12, None, False)]))
 
-    assert plan.record_gw is None
+    assert plan.record_strategies == []
     assert "no published deadline" in plan.reason
 
 
 def test_nothing_is_recorded_when_the_season_has_no_next_gameweek():
     plan = _plan(next_gw=None)
 
-    assert plan.record_gw is None
+    assert plan.record_strategies == []
     assert plan.reason == "no upcoming gameweek"
 
 
@@ -383,44 +420,97 @@ def test_a_finished_gameweek_on_record_is_scored():
     events = _events(
         [(11, "2026-11-21T11:00:00Z", True), (12, "2026-11-27T18:30:00Z", False)]
     )
-    plan = _plan(events=events, recorded_gws={11, 12}, next_gw=12)
+    plan = _plan(events=events, recorded={"model": {11, 12}}, snapshot_gws={11, 12})
 
-    assert plan.score_gws == [11]
-    # Scoring reads fifteen players' histories, not the whole game.
+    assert plan.score == [(11, "model")]
+    # Results are one request for the gameweek, not one per player.
+    assert plan.needs_results
     assert not plan.needs_full_season
+    assert plan.result_gws == [11]
+
+
+def test_every_strategy_recorded_for_a_gameweek_is_scored():
+    events = _events([(11, "2026-11-21T11:00:00Z", True)])
+    plan = _plan(
+        events=events,
+        recorded={"model": {11}, "naive": {11}},
+        snapshot_gws={11},
+        next_gw=None,
+        strategies=("model", "naive"),
+    )
+
+    assert plan.score == [(11, "model"), (11, "naive")]
+    # Both come out of the same single request for that gameweek.
+    assert plan.result_gws == [11]
 
 
 def test_a_gameweek_already_scored_is_not_scored_again():
     events = _events([(11, "2026-11-21T11:00:00Z", True)])
-    plan = _plan(events=events, recorded_gws={11}, scored_gws={11}, next_gw=None)
+    plan = _plan(
+        events=events,
+        recorded={"model": {11}},
+        scored={(11, "model")},
+        snapshot_gws={11},
+        outcome_gws={11},
+        next_gw=None,
+    )
 
-    assert plan.score_gws == []
+    assert plan.score == []
+    assert plan.outcomes_due == []
     assert plan.nothing_to_do
 
 
+def test_realized_points_are_written_once_the_gameweek_finishes():
+    events = _events([(11, "2026-11-21T11:00:00Z", True)])
+    plan = _plan(events=events, snapshot_gws={11}, next_gw=None, recorded={"model": set()})
+
+    assert plan.outcomes_due == [11]
+    assert plan.needs_results
+
+
+def test_realized_points_do_not_require_a_snapshot():
+    """The first gameweek recorded here predates snapshots entirely.
+
+    Its results are still what a forecast would be judged against, so they are
+    written for any gameweek that was tracked at all.
+    """
+    events = _events([(12, "2026-11-27T18:30:00Z", True)])
+    plan = _plan(
+        events=events,
+        recorded={"model": {12}},
+        scored={(12, "model")},
+        snapshot_gws=set(),
+        next_gw=None,
+    )
+
+    assert plan.outcomes_due == [12]
+
+
 def test_an_unfinished_gameweek_is_not_scored_even_once_recorded():
-    plan = _plan(recorded_gws={12})
-    assert plan.score_gws == []
+    plan = _plan(recorded={"model": {12}}, snapshot_gws={12})
+
+    assert plan.score == []
+    assert plan.outcomes_due == []
 
 
 def test_a_deadline_passing_with_no_record_is_reported_as_missed():
     """The alarm condition: a permanent hole in the record."""
     events = _events(
-        [
-            (12, "2026-11-27T18:30:00Z", True),
-            (13, "2026-12-01T18:30:00Z", False),
-        ]
+        [(12, "2026-11-27T18:30:00Z", True), (13, "2026-12-01T18:30:00Z", False)]
     )
     plan = plan_track(
         season="2026-27",
         events=events,
-        recorded_gws={12},
-        scored_gws={12},
+        recorded={"model": {12}},
+        scored={(12, "model")},
+        snapshot_gws={12},
+        outcome_gws={12},
         next_gw=14,
         now="2026-12-02T09:00:00Z",  # GW13's deadline has been and gone
+        strategies=("model",),
     )
 
-    assert plan.missed_gws == [13]
+    assert plan.missed == [(13, "model"), (13, "published-ep")]
 
 
 def test_gameweeks_before_tracking_began_are_not_missed():
@@ -438,18 +528,21 @@ def test_gameweeks_before_tracking_began_are_not_missed():
     plan = plan_track(
         season="2026-27",
         events=events,
-        recorded_gws={12},
-        scored_gws={12},
+        recorded={"model": {12}},
+        scored={(12, "model")},
+        snapshot_gws={12},
+        outcome_gws={12},
         next_gw=13,
         now="2026-11-28T09:00:00Z",
+        strategies=("model",),
     )
 
-    assert plan.missed_gws == []
+    assert plan.missed == []
 
 
 def test_nothing_is_missed_before_tracking_has_begun():
-    plan = _plan(now=AFTER_12, recorded_gws=set())
-    assert plan.missed_gws == []
+    plan = _plan(now=AFTER_12, recorded={"model": set()})
+    assert plan.missed == []
 
 
 def test_the_plan_reads_neither_disk_nor_network():
@@ -465,6 +558,91 @@ def test_the_plan_reads_neither_disk_nor_network():
     source = inspect.getsource(track.plan_track)
     for forbidden in ("open(", "requests", "load_recommendation", "Path("):
         assert forbidden not in source
+
+
+# --- does a four-hourly schedule actually catch a tight window? -------------
+
+
+#: What the workflow runs at.
+SCHEDULE_HOURS = 4
+
+
+def _runs_between(start: datetime, end: datetime):
+    """The scheduled run times in a window, as the cron would fire them."""
+    moment = start.replace(minute=0, second=0, microsecond=0)
+    while moment <= end:
+        yield moment
+        moment += timedelta(hours=SCHEDULE_HOURS)
+
+
+@pytest.mark.parametrize("gap_days", [2.5, 3.0, 4.0, 7.0])
+def test_the_schedule_catches_a_window_of_this_length(gap_days):
+    """Deadlines 2.5 days apart still leave the window comfortably covered.
+
+    Gameweeks are not evenly spaced: a Saturday deadline followed by a midweek
+    one can be two and a half days apart, which is the tightest realistic
+    turnaround. The window opens when the API's ``is_next`` moves on — at the
+    earlier deadline — and closes at the later one, so with four-hourly runs a
+    2.5-day gap is fifteen chances.
+
+    This walks the cron across the window and asserts a run both *exists* and
+    *decides to record*, rather than assuming arithmetic.
+    """
+    opens = _parse("2026-11-27T18:30:00Z")  # GW12's deadline: GW13 becomes next
+    closes = opens + timedelta(days=gap_days)
+    events = _events(
+        [
+            (12, "2026-11-27T18:30:00Z", True),
+            (13, closes.strftime("%Y-%m-%dT%H:%M:%SZ"), False),
+        ]
+    )
+
+    recording_runs = [
+        moment
+        for moment in _runs_between(opens, closes)
+        if plan_track(
+            season="2026-27",
+            events=events,
+            recorded={"model": {12}},
+            scored={(12, "model")},
+            snapshot_gws={12},
+            outcome_gws={12},
+            next_gw=13,
+            now=moment,
+            strategies=("model",),
+        ).record_strategies
+        == ["model"]
+    ]
+
+    expected = int(gap_days * 24 / SCHEDULE_HOURS)
+    assert len(recording_runs) >= expected - 1, (
+        f"a {gap_days}-day window gave only {len(recording_runs)} chances"
+    )
+    # The first chance comes within four hours of the window opening, so a
+    # record exists long before the deadline rather than just before it.
+    assert (recording_runs[0] - opens) < timedelta(hours=SCHEDULE_HOURS)
+    assert recording_runs[-1] < closes
+
+
+def test_the_window_closes_at_the_deadline_not_after():
+    """A run between the deadline and kick-off records nothing."""
+    events = _events(
+        [(12, "2026-11-27T18:30:00Z", True), (13, "2026-11-30T06:30:00Z", False)]
+    )
+    after = plan_track(
+        season="2026-27",
+        events=events,
+        recorded={"model": {12}},
+        scored={(12, "model")},
+        snapshot_gws={12},
+        outcome_gws={12},
+        next_gw=13,
+        now="2026-11-30T10:30:00Z",  # four hours late
+        strategies=("model",),
+    )
+
+    assert after.record_strategies == []
+    assert "deadline has passed" in after.reason
 
 
 # --- recording is idempotent and never late ---------------------------------
@@ -494,3 +672,157 @@ def test_recording_twice_writes_one_file(season, rules, config):
             record(_recommendation(season, rules, config), config)
 
     assert len(list(first.parent.glob("*-gw02-ep.json"))) == 1
+
+
+# --- the pre-deadline snapshot of FPL's own numbers -------------------------
+
+
+def _bootstrap():
+    """A bootstrap payload as the API serves one: three elements, one of which
+    is the assistant-manager slot that has no place in a squad."""
+    return {
+        "element_types": [
+            {"id": 1, "singular_name_short": "GKP"},
+            {"id": 3, "singular_name_short": "MID"},
+            {"id": 5, "singular_name_short": "AM"},
+        ],
+        "teams": [{"id": 7, "name": "Rovers", "short_name": "ROV"}],
+        "elements": [
+            {
+                "id": 1,
+                "web_name": "Keeper",
+                "element_type": 1,
+                "team": 7,
+                "now_cost": 45,
+                "ep_next": "3.4",
+                "status": "a",
+                "chance_of_playing_next_round": None,
+            },
+            {
+                "id": 2,
+                "web_name": "Doubtful",
+                "element_type": 3,
+                "team": 7,
+                "now_cost": 85,
+                "ep_next": "5.9",
+                "status": "d",
+                "chance_of_playing_next_round": 25,
+            },
+            {
+                "id": 3,
+                "web_name": "Manager",
+                "element_type": 5,
+                "team": 7,
+                "now_cost": 15,
+                "ep_next": "0.0",
+                "status": "a",
+                "chance_of_playing_next_round": 100,
+            },
+        ],
+    }
+
+
+def test_the_snapshot_captures_the_published_figure_for_every_player():
+    frame = snapshot_from_bootstrap(
+        _bootstrap(), 13, recorded_at="2026-11-30T09:00:00Z", deadline="2026-12-01T18:30:00Z"
+    )
+
+    assert list(frame.columns) == list(SNAPSHOT_COLUMNS)
+    # The assistant-manager slot has no squad place, so it is not a player here.
+    assert list(frame["player_id"]) == [1, 2]
+    assert frame.set_index("player_id").loc[1, "ep"] == pytest.approx(3.4)
+    assert frame.set_index("player_id").loc[2, "ep"] == pytest.approx(5.9)
+    assert set(frame["recorded_at"]) == {"2026-11-30T09:00:00Z"}
+    assert set(frame["deadline"]) == {"2026-12-01T18:30:00Z"}
+
+
+def test_the_snapshot_keeps_what_fpl_thought_of_fitness():
+    """An expected-points figure cannot be judged without it.
+
+    A 5.9 for a player FPL rates 25% likely to feature means something
+    different from a 5.9 for a nailed starter.
+    """
+    frame = snapshot_from_bootstrap(
+        _bootstrap(), 13, recorded_at="2026-11-30T09:00:00Z", deadline=None
+    ).set_index("player_id")
+
+    assert frame.loc[1, "availability"] == pytest.approx(1.0)
+    assert frame.loc[2, "availability"] == pytest.approx(0.25)
+
+
+def test_the_snapshot_carries_prices_so_a_squad_can_be_derived_later(config):
+    """Everything in it is pre-deadline, so a later derivation stays honest.
+
+    A squad picked from this file next year uses only what was published before
+    the deadline — which is exactly what the archive's `xP` could not promise.
+    """
+    frame = snapshot_from_bootstrap(
+        _bootstrap(), 13, recorded_at="2026-11-30T09:00:00Z", deadline="2026-12-01T18:30:00Z"
+    )
+
+    assert {"price", "position", "club"} <= set(frame.columns)
+    assert int(frame.set_index("player_id").loc[2, "price"]) == 85
+
+
+def test_a_snapshot_is_never_overwritten(config):
+    frame = snapshot_from_bootstrap(
+        _bootstrap(), 13, recorded_at="2026-11-30T09:00:00Z", deadline="2026-12-01T18:30:00Z"
+    )
+    write_snapshot(frame, "2026-27", 13, config)
+
+    later = snapshot_from_bootstrap(
+        _bootstrap(), 13, recorded_at="2026-12-02T09:00:00Z", deadline="2026-12-01T18:30:00Z"
+    )
+    with pytest.raises(FileExistsError, match="will not be overwritten"):
+        write_snapshot(later, "2026-27", 13, config)
+
+    on_disk = load_snapshot("2026-27", 13, config)
+    assert set(on_disk["recorded_at"]) == {"2026-11-30T09:00:00Z"}
+
+
+def test_a_snapshot_round_trips(config):
+    frame = snapshot_from_bootstrap(
+        _bootstrap(), 13, recorded_at="2026-11-30T09:00:00Z", deadline="2026-12-01T18:30:00Z"
+    )
+    write_snapshot(frame, "2026-27", 13, config)
+
+    assert load_snapshot("2026-27", 13, config) is not None
+    assert load_snapshot("2026-27", 99, config) is None
+
+
+# --- realized points for every player ---------------------------------------
+
+
+def test_outcomes_sum_both_legs_of_a_double(season):
+    outcomes = outcomes_from(season, DOUBLE_GW).set_index("player_id")
+
+    # The pinned gameweek-2 totals.
+    assert outcomes.loc[1, "points"] == 6
+    assert outcomes.loc[2, "points"] == 11
+    assert outcomes.loc[3, "points"] == 8
+    assert outcomes.loc[4, "points"] == 12
+    assert outcomes.loc[1, "minutes"] == 180
+
+
+def test_outcomes_cover_every_player_who_had_a_fixture(season):
+    outcomes = outcomes_from(season, DOUBLE_GW)
+
+    assert list(outcomes.columns) == list(PLAYER_OUTCOME_COLUMNS)
+    assert len(outcomes) == season.at(DOUBLE_GW)["player_id"].nunique()
+
+
+def test_outcomes_for_a_gameweek_nobody_played_are_empty(season):
+    assert outcomes_from(season, 99).empty
+
+
+def test_outcomes_may_be_rewritten_because_results_get_revised(season, config):
+    """FPL revises bonus points after the fact; a result is not a forecast."""
+    first = outcomes_from(season, DOUBLE_GW)
+    write_outcomes(first, "2024-25", DOUBLE_GW, config)
+
+    revised = first.copy()
+    revised.loc[revised["player_id"] == 1, "points"] = 8
+    path = write_outcomes(revised, "2024-25", DOUBLE_GW, config)
+
+    again = pd.read_csv(path).set_index("player_id")
+    assert int(again.loc[1, "points"]) == 8

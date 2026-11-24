@@ -8,7 +8,7 @@
       26
     ],
     "fallback_gameweeks": [],
-    "total_points": 3349,
+    "total_points": 3341,
     "scored_gameweeks": [
       1,
       2,
@@ -49,13 +49,13 @@
       37,
       38
     ],
-    "points_per_gameweek": 88.13,
+    "points_per_gameweek": 87.92,
     "total_transfers": 81,
     "total_hits": 180,
     "comparable": false,
-    "not_comparable_because": "the published expected-points column rates 66% of non-appearances at exactly zero, so this strategy already knows who played",
+    "not_comparable_because": "the published expected-points column rates 66% of non-appearances at exactly zero and scores past any human, so its total is not a comparable result; whether that is hindsight or unusually good injury news is not something this data can settle",
     "notes": [
-      "the published expected-points column rates 66% of non-appearances at exactly zero, so this strategy already knows who played",
+      "the published expected-points column rates 66% of non-appearances at exactly zero and scores past any human, so its total is not a comparable result; whether that is hindsight or unusually good injury news is not something this data can settle",
       "FPL expected points cover 97% of gameweeks (37 of 38); the squad is held unchanged in the rest",
       "archive `xP` knows who played: 66% of player-gameweeks with zero minutes are rated exactly 0.0, which a pre-deadline forecast could not do. The FPL expected-points baseline is therefore not comparable with strategies that had to guess playing time",
       "archive `xP` is all-zero (not collected) for 1 of 38 gameweeks: [26] \u2014 treated as missing, so the FPL expected-points baseline cannot decide those",
@@ -127,7 +127,7 @@
     "decided_gameweeks": 37,
     "held_gameweeks": [],
     "fallback_gameweeks": [],
-    "total_points": 1954,
+    "total_points": 2023,
     "scored_gameweeks": [
       2,
       3,
@@ -167,9 +167,9 @@
       37,
       38
     ],
-    "points_per_gameweek": 52.81,
-    "total_transfers": 41,
-    "total_hits": 20,
+    "points_per_gameweek": 54.68,
+    "total_transfers": 39,
+    "total_hits": 12,
     "comparable": true,
     "not_comparable_because": null,
     "notes": [
@@ -190,7 +190,7 @@
       34
     ],
     "fallback_gameweeks": [],
-    "total_points": 3197,
+    "total_points": 3186,
     "scored_gameweeks": [
       1,
       2,
@@ -231,13 +231,13 @@
       37,
       38
     ],
-    "points_per_gameweek": 84.13,
+    "points_per_gameweek": 83.84,
     "total_transfers": 68,
     "total_hits": 120,
     "comparable": false,
-    "not_comparable_because": "the published expected-points column rates 64% of non-appearances at exactly zero, so this strategy already knows who played",
+    "not_comparable_because": "the published expected-points column rates 64% of non-appearances at exactly zero and scores past any human, so its total is not a comparable result; whether that is hindsight or unusually good injury news is not something this data can settle",
     "notes": [
-      "the published expected-points column rates 64% of non-appearances at exactly zero, so this strategy already knows who played",
+      "the published expected-points column rates 64% of non-appearances at exactly zero and scores past any human, so its total is not a comparable result; whether that is hindsight or unusually good injury news is not something this data can settle",
       "FPL expected points cover 92% of gameweeks (35 of 38); the squad is held unchanged in the rest",
       "dropped 322 rows with non-squad position(s) ['AM'] (assistant-manager slot has no place in a 15-player squad)",
       "archive `xP` knows who played: 64% of player-gameweeks with zero minutes are rated exactly 0.0, which a pre-deadline forecast could not do. The FPL expected-points baseline is therefore not comparable with strategies that had to guess playing time",
@@ -311,7 +311,7 @@
     "decided_gameweeks": 37,
     "held_gameweeks": [],
     "fallback_gameweeks": [],
-    "total_points": 2108,
+    "total_points": 2102,
     "scored_gameweeks": [
       2,
       3,
@@ -351,9 +351,9 @@
       37,
       38
     ],
-    "points_per_gameweek": 56.97,
-    "total_transfers": 44,
-    "total_hits": 28,
+    "points_per_gameweek": 56.81,
+    "total_transfers": 45,
+    "total_hits": 32,
     "comparable": true,
     "not_comparable_because": null,
     "notes": [
@@ -427,7 +427,7 @@
     "decided_gameweeks": 37,
     "held_gameweeks": [],
     "fallback_gameweeks": [],
-    "total_points": 1911,
+    "total_points": 1925,
     "scored_gameweeks": [
       2,
       3,
@@ -467,9 +467,9 @@
       37,
       38
     ],
-    "points_per_gameweek": 51.65,
-    "total_transfers": 45,
-    "total_hits": 32,
+    "points_per_gameweek": 52.03,
+    "total_transfers": 44,
+    "total_hits": 28,
     "comparable": true,
     "not_comparable_because": null,
     "notes": [

@@ -19,12 +19,36 @@ Each scored gameweek is written next to the figure FPL publishes for the
 average of every entered team, which is the only benchmark the live path has
 that the archive does not (see :mod:`fpl_optimizer.archive`). Beating it is a
 low bar and a real one.
+
+What a gameweek's record holds
+------------------------------
+Captured together, before the deadline, and never rewritten:
+
+* a squad per strategy — the model and the naive baseline, so the live record
+  compares what the backtest compared;
+* FPL's own published expected points for **every** player, with price,
+  position and what FPL thought of their fitness.
+
+That last one is the point of :func:`snapshot_from_bootstrap`. The archive's
+version of the same column tracks realized minutes closely enough to be
+unusable as a baseline, and the statistic alone cannot say whether that is
+hindsight or unusually good team news. This is the same field read *before* the
+deadline, where it is unambiguously a forecast. Frozen weekly, it settles the
+question by measurement instead of argument — and costs nothing, because
+``ep_next`` arrives in the payload the planning step already fetched.
+
+Once the gameweek is played:
+
+* every player's realized points and minutes, summed across both legs of a
+  double, which is what a forecast gets judged against;
+* each strategy's score beside the average of every team entered worldwide.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,116 +155,6 @@ def _parse(stamp: str) -> datetime:
     return parsed
 
 
-@dataclass
-class TrackPlan:
-    """What a run of ``fpl track`` should do, decided before fetching anything.
-
-    Deciding is cheap — it needs the gameweek deadlines, which arrive in one
-    request, plus the records already on disk. Acting is expensive: recording
-    needs a history for every player in the game, one request each. Separating
-    them is what makes running this every few hours reasonable rather than
-    thousands of requests a day to discover there is nothing to do.
-    """
-
-    season: str
-    next_gw: int | None
-    next_deadline: str | None
-    #: The gameweek to record for, or ``None`` if there is nothing to record.
-    record_gw: int | None
-    #: Finished gameweeks with a recommendation on record and no score yet.
-    score_gws: list[int]
-    #: Gameweeks whose deadline passed with nothing on record, after tracking
-    #: began. Each one is a permanent hole in the record.
-    missed_gws: list[int]
-    #: Why there is nothing to record, when there is nothing to record.
-    reason: str = ""
-
-    @property
-    def nothing_to_do(self) -> bool:
-        return self.record_gw is None and not self.score_gws
-
-    @property
-    def needs_full_season(self) -> bool:
-        """Recording projects every player, so it needs every player's history."""
-        return self.record_gw is not None
-
-
-def plan_track(
-    season: str,
-    events: pd.DataFrame,
-    *,
-    recorded_gws: set[int],
-    scored_gws: set[int],
-    next_gw: int | None,
-    now: datetime | str,
-    strategy: str = "model",
-) -> TrackPlan:
-    """Decide what to do, from deadlines and what is already on record.
-
-    Pure: no network, no disk. Every branch the scheduled workflow can take is
-    therefore testable without either.
-    """
-    moment = _parse(now) if isinstance(now, str) else now
-    deadlines: dict[int, str | None] = {}
-    for row in events.to_dict("records"):
-        value = row.get("deadline_time")
-        deadlines[int(row["gw"])] = None if pd.isna(value) else str(value)
-    finished = {
-        int(row["gw"]): bool(row.get("finished"))
-        for row in events.to_dict("records")
-    }
-
-    def passed(gw: int) -> bool:
-        stamp = deadlines.get(gw)
-        return stamp is not None and _parse(stamp) <= moment
-
-    # --- what to record ----------------------------------------------------
-    record_gw: int | None = None
-    reason = ""
-    next_deadline = deadlines.get(next_gw) if next_gw is not None else None
-    if next_gw is None:
-        reason = "no upcoming gameweek"
-    elif next_gw in recorded_gws:
-        reason = f"GW{next_gw} is already on record"
-    elif next_deadline is None:
-        reason = f"GW{next_gw} has no published deadline"
-    elif passed(next_gw):
-        # The record is only worth anything if it predates the deadline, so a
-        # late run records nothing rather than something worthless.
-        reason = f"GW{next_gw}'s deadline has passed"
-    else:
-        record_gw = next_gw
-
-    # --- what to score -----------------------------------------------------
-    score_gws = sorted(
-        gw
-        for gw in recorded_gws
-        if finished.get(gw) and gw not in scored_gws
-    )
-
-    # --- what was missed ---------------------------------------------------
-    # Only after tracking began: the gameweeks played before the first
-    # recommendation was ever written are not missed, they are prehistory.
-    missed_gws: list[int] = []
-    if recorded_gws:
-        began = min(recorded_gws)
-        missed_gws = sorted(
-            gw
-            for gw in deadlines
-            if gw > began and passed(gw) and gw not in recorded_gws
-        )
-
-    return TrackPlan(
-        season=season,
-        next_gw=next_gw,
-        next_deadline=next_deadline,
-        record_gw=record_gw,
-        score_gws=score_gws,
-        missed_gws=missed_gws,
-        reason=reason,
-    )
-
-
 def live_dir(config: Config | None = None) -> Path:
     directory = (config or Config()).results_dir / LIVE_DIR
     directory.mkdir(parents=True, exist_ok=True)
@@ -336,6 +250,303 @@ def recommend(
         transfers_out=[int(p) for p in plan.transfers_out],
         transfer_hit=int(plan.transfer_hit),
         names={str(p): str(names.get(p, "?")) for p in plan.squad.players},
+    )
+
+
+#: Columns of the pre-deadline snapshot. Everything here is published before
+#: the deadline, which is what makes the file worth freezing.
+SNAPSHOT_COLUMNS: tuple[str, ...] = (
+    "player_id",
+    "name",
+    "position",
+    "club",
+    "price",
+    "ep",
+    "availability",
+    "recorded_at",
+    "deadline",
+)
+
+#: Columns of the post-gameweek per-player outcomes. Named for players to
+#: keep it distinct from `schema.OUTCOME_COLUMNS`, which classifies the
+#: canonical frame's columns and is a different idea entirely.
+PLAYER_OUTCOME_COLUMNS: tuple[str, ...] = ("player_id", "points", "minutes", "starts")
+
+#: The label the snapshot uses where a strategy name would otherwise go.
+SNAPSHOT_LABEL = "published-ep"
+
+
+def snapshot_path(season: str, gw: int, config: Config | None = None) -> Path:
+    return live_dir(config) / f"{season}-gw{gw:02d}-{SNAPSHOT_LABEL}.csv"
+
+
+def outcomes_path(season: str, gw: int, config: Config | None = None) -> Path:
+    return live_dir(config) / f"{season}-gw{gw:02d}-outcomes.csv"
+
+
+def snapshot_from_bootstrap(
+    bootstrap: dict, gw: int, *, recorded_at: str, deadline: str | None
+) -> pd.DataFrame:
+    """FPL's published expected points for every player, as they stand now.
+
+    Why bother, when the archive carries ``xP`` for completed seasons: because
+    the archive's version has been written down after the fact and knows who
+    played, which is what disqualified it as a baseline. This is the same field
+    read *before* the deadline, when it is still a forecast. Frozen weekly it
+    becomes the thing the archive should have been — and the first honest way to
+    measure how good FPL's own number actually is.
+
+    Costs nothing extra: ``ep_next`` arrives in ``bootstrap-static``, which the
+    planning step already fetched.
+    """
+    from .rules import normalize_position
+
+    rows = []
+    teams = {int(t["id"]): t["name"] for t in bootstrap.get("teams") or []}
+    types = {
+        int(t["id"]): t.get("singular_name_short")
+        for t in bootstrap.get("element_types") or []
+    }
+    for element in bootstrap.get("elements") or []:
+        position = normalize_position(types.get(int(element["element_type"]), ""))
+        if position is None:
+            continue
+        chance = element.get("chance_of_playing_next_round")
+        rows.append(
+            {
+                "player_id": int(element["id"]),
+                "name": element.get("web_name"),
+                "position": position,
+                "club": teams.get(int(element["team"])),
+                "price": int(element["now_cost"]),
+                "ep": pd.to_numeric(element.get("ep_next"), errors="coerce"),
+                # Kept because an expected-points figure cannot be judged
+                # without knowing what FPL thought of the player's fitness.
+                "availability": (
+                    1.0
+                    if chance is None and element.get("status") == "a"
+                    else (float(chance) / 100.0 if chance is not None else 0.0)
+                ),
+                "recorded_at": recorded_at,
+                "deadline": deadline,
+            }
+        )
+    return pd.DataFrame(rows, columns=list(SNAPSHOT_COLUMNS))
+
+
+def write_snapshot(
+    frame: pd.DataFrame, season: str, gw: int, config: Config | None = None
+) -> Path:
+    """Freeze the snapshot. Refuses to overwrite, for the same reason a
+    recommendation refuses: a file rewritten after the gameweek is not a
+    forecast of it."""
+    path = snapshot_path(season, gw, config)
+    if path.exists():
+        raise FileExistsError(
+            f"a published-expected-points snapshot for GW{gw} is already on "
+            f"record at {path}; it will not be overwritten"
+        )
+    frame.to_csv(path, index=False)
+    log.info("wrote GW%d published-expected-points snapshot to %s", gw, path)
+    return path
+
+
+def load_snapshot(
+    season: str, gw: int, config: Config | None = None
+) -> pd.DataFrame | None:
+    path = snapshot_path(season, gw, config)
+    return None if not path.exists() else pd.read_csv(path)
+
+
+def outcomes_from(data: SeasonData, gw: int) -> pd.DataFrame:
+    """Realized points and minutes for every player in a finished gameweek.
+
+    Summed over both fixtures of a double, like everything else that reads a
+    result. This is the other half of the snapshot: a forecast is only worth
+    anything next to what happened.
+    """
+    rows = data.at(gw)
+    if rows.empty:
+        return pd.DataFrame(columns=list(PLAYER_OUTCOME_COLUMNS))
+    grouped = (
+        rows.groupby("player_id", as_index=False)[["points", "minutes", "starts"]]
+        .sum()
+        .astype({"player_id": "int64"})
+    )
+    for column in ("points", "minutes", "starts"):
+        grouped[column] = pd.to_numeric(grouped[column], errors="coerce").fillna(0)
+    return grouped[list(PLAYER_OUTCOME_COLUMNS)].astype(
+        {"points": "int64", "minutes": "int64", "starts": "int64"}
+    )
+
+
+def write_outcomes(
+    frame: pd.DataFrame, season: str, gw: int, config: Config | None = None
+) -> Path:
+    """Write per-player results. Rewritable, unlike a snapshot.
+
+    Results are facts about a gameweek that has happened, so a later write is a
+    correction rather than a rewrite of history — FPL does revise bonus points
+    and the occasional appearance after the fact.
+    """
+    path = outcomes_path(season, gw, config)
+    frame.to_csv(path, index=False)
+    return path
+
+
+@dataclass
+class TrackPlan:
+    """What a run of ``fpl track`` should do, decided before fetching anything.
+
+    Deciding is cheap — the gameweek deadlines arrive in one request, and the
+    rest is files already on disk. Acting is not: recording projects every
+    player and so needs a history for each. Separating them is what makes
+    running this every few hours reasonable rather than thousands of requests a
+    day to discover there is nothing to do.
+    """
+
+    season: str
+    next_gw: int | None
+    next_deadline: str | None
+    #: Strategies still needing a recommendation for ``next_gw``, while its
+    #: deadline is still ahead. Empty once they are all on record.
+    record_strategies: list[str] = field(default_factory=list)
+    #: Whether the per-player published-expected-points snapshot is still
+    #: wanted for ``next_gw``. Free to take: it comes from the same request.
+    record_snapshot: bool = False
+    #: ``(gw, strategy)`` pairs whose squads can now be scored.
+    score: list[tuple[int, str]] = field(default_factory=list)
+    #: Finished gameweeks with a snapshot but no realized per-player results.
+    outcomes_due: list[int] = field(default_factory=list)
+    #: ``(gw, label)`` that can never be recorded now — the deadline has gone.
+    #: Each one is a permanent hole in the record.
+    missed: list[tuple[int, str]] = field(default_factory=list)
+    #: Why there is nothing to record, when there is nothing to record.
+    reason: str = ""
+
+    @property
+    def nothing_to_do(self) -> bool:
+        return not (
+            self.record_strategies
+            or self.record_snapshot
+            or self.score
+            or self.outcomes_due
+        )
+
+    @property
+    def needs_full_season(self) -> bool:
+        """Only recording does: it projects every player, so it needs every
+        player's history. The snapshot comes from the bootstrap payload."""
+        return bool(self.record_strategies)
+
+    @property
+    def needs_results(self) -> bool:
+        """Scoring and per-player outcomes both read one gameweek's results,
+        which is one request to ``event/{gw}/live``."""
+        return bool(self.score or self.outcomes_due)
+
+    @property
+    def result_gws(self) -> list[int]:
+        return sorted({gw for gw, _ in self.score} | set(self.outcomes_due))
+
+
+def plan_track(
+    season: str,
+    events: pd.DataFrame,
+    *,
+    recorded: Mapping[str, set[int]],
+    scored: set[tuple[int, str]],
+    snapshot_gws: set[int],
+    outcome_gws: set[int],
+    next_gw: int | None,
+    now: datetime | str,
+    strategies: Sequence[str] = ("model", "naive"),
+) -> TrackPlan:
+    """Decide what to do, from deadlines and what is already on disk.
+
+    Pure: no network, no filesystem. Every branch the scheduled workflow can
+    take is therefore testable without either.
+    """
+    moment = _parse(now) if isinstance(now, str) else now
+    deadlines: dict[int, str | None] = {}
+    finished: dict[int, bool] = {}
+    for row in events.to_dict("records"):
+        gw = int(row["gw"])
+        value = row.get("deadline_time")
+        deadlines[gw] = None if pd.isna(value) else str(value)
+        finished[gw] = bool(row.get("finished"))
+
+    def passed(gw: int) -> bool:
+        stamp = deadlines.get(gw)
+        return stamp is not None and _parse(stamp) <= moment
+
+    # --- what to record ----------------------------------------------------
+    record_strategies: list[str] = []
+    record_snapshot = False
+    reason = ""
+    next_deadline = deadlines.get(next_gw) if next_gw is not None else None
+    if next_gw is None:
+        reason = "no upcoming gameweek"
+    elif next_deadline is None:
+        reason = f"GW{next_gw} has no published deadline"
+    elif passed(next_gw):
+        # The record is only worth anything if it predates the deadline, so a
+        # late run records nothing rather than something worthless.
+        reason = f"GW{next_gw}'s deadline has passed"
+    else:
+        record_strategies = [
+            name
+            for name in strategies
+            if next_gw not in set(recorded.get(name, set()))
+        ]
+        record_snapshot = next_gw not in snapshot_gws
+        if not record_strategies and not record_snapshot:
+            reason = f"GW{next_gw} is already on record"
+
+    # --- what to score, and whose results to write -------------------------
+    score = sorted(
+        (gw, name)
+        for name in strategies
+        for gw in recorded.get(name, set())
+        if finished.get(gw) and (gw, name) not in scored
+    )
+    # Realized per-player points are worth having for any gameweek that was
+    # tracked at all, not only one that was snapshotted: the first gameweek
+    # recorded here predates snapshots, and its results are still the thing a
+    # forecast would be judged against.
+    tracked_gws = set(snapshot_gws).union(*recorded.values()) if recorded else set(snapshot_gws)
+    outcomes_due = sorted(
+        gw for gw in tracked_gws if finished.get(gw) and gw not in outcome_gws
+    )
+
+    # --- what was missed ---------------------------------------------------
+    # Only after tracking began: gameweeks played before the first record was
+    # ever written are not missed, they are prehistory.
+    missed: list[tuple[int, str]] = []
+    began = min(
+        [min(gws) for gws in recorded.values() if gws] + ([min(snapshot_gws)] if snapshot_gws else []),
+        default=None,
+    )
+    if began is not None:
+        for gw in sorted(deadlines):
+            if gw <= began or not passed(gw):
+                continue
+            for name in strategies:
+                if gw not in set(recorded.get(name, set())):
+                    missed.append((gw, name))
+            if gw not in snapshot_gws:
+                missed.append((gw, SNAPSHOT_LABEL))
+
+    return TrackPlan(
+        season=season,
+        next_gw=next_gw,
+        next_deadline=next_deadline,
+        record_strategies=record_strategies,
+        record_snapshot=record_snapshot,
+        score=score,
+        outcomes_due=outcomes_due,
+        missed=missed,
+        reason=reason,
     )
 
 

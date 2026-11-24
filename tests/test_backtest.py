@@ -297,7 +297,7 @@ def test_compare_puts_the_strategies_side_by_side(season, rules, config):
     assert int(ep_row["gameweeks"]) == 3 and int(naive_row["gameweeks"]) == 2
 
 
-def test_a_strategy_that_knows_who_played_is_marked_not_comparable(rules, config):
+def test_a_strategy_tracking_realized_minutes_is_marked_not_comparable(rules, config):
     """It still runs and still scores; what it does not get is a comparison.
 
     A gap against the baseline would read as a finding about projections, when
@@ -312,7 +312,9 @@ def test_a_strategy_that_knows_who_played_is_marked_not_comparable(rules, config
 
     result = backtest(data, "ep", rules, config=config)
     assert not result.comparable
-    assert "knows who played" in (result.not_comparable_because or "")
+    assert "not a comparable result" in (result.not_comparable_because or "")
+    # The reason is careful about what the statistic does and does not show.
+    assert "not something this data can settle" in result.not_comparable_because
     assert result.total_points > 0, "it is still run and still scored"
 
     naive = backtest(data, "naive", rules, config=config)

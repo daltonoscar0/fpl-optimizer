@@ -241,8 +241,10 @@ def backtest(
             result.comparable = False
             result.not_comparable_because = (
                 f"the published expected-points column rates "
-                f"{hindsight_share:.0%} of non-appearances at exactly zero, so "
-                f"this strategy already knows who played"
+                f"{hindsight_share:.0%} of non-appearances at exactly zero and "
+                f"scores past any human, so its total is not a comparable "
+                f"result; whether that is hindsight or unusually good injury "
+                f"news is not something this data can settle"
             )
             result.notes.append(result.not_comparable_because)
         result.notes.append(
