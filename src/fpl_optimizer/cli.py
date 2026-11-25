@@ -112,6 +112,27 @@ console = Console()
 THIN_MARGIN = 1.0
 
 
+def defensible_size(points_by_size: list[tuple[int, float]], margin: float) -> int:
+    """The largest plan size whose every step up to it cleared ``margin``.
+
+    The integer program maximises expected points, so it will always take one
+    more transfer for a tenth of a point — and with five free transfers banked
+    it will take all five. Steps smaller than ``margin`` are inside the
+    projections' own error, so this is where the advice stops: at the last step
+    that bought more than the noise.
+
+    ``points_by_size`` is ``(size, expected_points)`` in ascending size, the
+    rows of the comparison table. The first entry is holding.
+    """
+    ordered = sorted(points_by_size)
+    stop = ordered[0][0] if ordered else 0
+    for (_, before), (size, after) in zip(ordered, ordered[1:]):
+        if after - before < margin:
+            break
+        stop = size
+    return stop
+
+
 def _verbose(flag: bool) -> None:
     logging.basicConfig(
         level=logging.INFO if flag else logging.WARNING,
@@ -384,8 +405,11 @@ def table(
     config = Config()
     path = (results_dir or config.results_dir) / "summary.json"
     if not path.exists():
+        # The action goes first: rich wraps this inside an error panel, and
+        # with the path leading, a deep results dir pushed `fpl backtest all`
+        # across a line break.
         raise typer.BadParameter(
-            f"no summary at {path}: run `fpl backtest all` first"
+            f"no backtest summary: run `fpl backtest all` first (looked in {path})"
         )
     summaries = json.loads(path.read_text())
 
@@ -1035,18 +1059,21 @@ def transfers(
     with_hits = solve(max_hits) if max_hits > 0 else free_only
 
     if transfers_wanted is not None:
-        best = solve(max_hits, exactly=transfers_wanted)
+        objective_best = solve(max_hits, exactly=transfers_wanted)
         console.print(
             f"Planning exactly {transfers_wanted} transfer(s), as asked."
         )
     else:
-        best = (
+        objective_best = (
             with_hits
             if with_hits.expected_points > free_only.expected_points
             else free_only
         )
+    # The plan actually recommended. It is the objective's choice unless the
+    # last steps up to it are inside the projections' own error, in which case
+    # it is trimmed back below — see "the defensible stopping point".
+    best = objective_best
     hit_gain = with_hits.expected_points - free_only.expected_points
-    gain = best.expected_points - hold.expected_points
 
     names = (
         data.player_gws.drop_duplicates("player_id")
@@ -1054,7 +1081,7 @@ def transfers(
         .astype(str)
     )
     positions = positions_from(data)
-    best.squad.validate(positions, rule_set)
+    objective_best.squad.validate(positions, rule_set)
 
     def label(pid: int) -> str:
         return f"{names.get(pid, pid)} ({positions.get(pid, '?')})"
@@ -1090,7 +1117,7 @@ def transfers(
     # the optimizer changes its mind about which players it wants when the
     # count changes. So each size is solved on its own and shown entire, and
     # the advice compares plans rather than inviting one to be edited.
-    ceiling = max(best.n_transfers, 1)
+    ceiling = max(objective_best.n_transfers, 1)
     plans: list[tuple[int, SquadPlan]] = [(0, hold)]
     for size in range(1, ceiling + 1):
         try:
@@ -1125,6 +1152,36 @@ def transfers(
         )
         previous_points = plan.expected_points
     console.print(comparison)
+    # What the column actually is. It is the integer program's objective, so it
+    # carries the horizon term as well as this gameweek, and read as a GW12
+    # scoreline it flatters every transfer.
+    console.print(
+        f"  [dim]'expected points' is the objective: GW{target} plus a "
+        f"decayed average of the next {horizon} gameweeks (so about two "
+        f"gameweeks' worth), bench at {config.bench_weight:g} weight, the "
+        f"captain counted twice, less any hit. Compare rows against each "
+        f"other; do not read a row as a GW{target} score.[/dim]"
+    )
+
+    # --- trim the recommendation back to what the margins support ---------
+    # The objective maximises expected points, so it will always take one more
+    # transfer for a tenth of a point. Steps smaller than THIN_MARGIN are
+    # inside the projections' own error, so the plan that gets recommended —
+    # and whose XI, bench and captain are printed below — stops at the last
+    # step that was worth more than the noise. Without this the headline said
+    # "the 5-transfer plan" and the paragraph underneath said 4 was the
+    # defensible one, which is advice pointing two ways at once.
+    stop_at = defensible_size(
+        [(size, plan.expected_points) for size, plan in plans], THIN_MARGIN
+    )
+    trimmed_from: int | None = None
+    if transfers_wanted is None and stop_at < objective_best.n_transfers:
+        at_defensible = next(
+            (plan for size, plan in plans if size == stop_at), None
+        )
+        if at_defensible is not None:
+            trimmed_from = objective_best.n_transfers
+            best = at_defensible
 
     chosen_size = best.n_transfers
     console.print(
@@ -1132,6 +1189,19 @@ def transfers(
         if chosen_size
         else "\n[bold]Recommended: no transfer — roll it.[/bold]"
     )
+    if trimmed_from is not None:
+        surplus = (
+            objective_best.expected_points - best.expected_points
+        )
+        console.print(
+            f"[dim]The objective's own maximum is {trimmed_from} transfers, "
+            f"{surplus:+.2f} points beyond this one. Those last "
+            f"{trimmed_from - chosen_size} step(s) are each worth less than "
+            f"{THIN_MARGIN:.0f} point, which is inside the projections' error, "
+            f"so they are not recommended. "
+            f"Use --transfers {trimmed_from} to see that plan entire.[/dim]"
+        )
+
     def show(plan: SquadPlan, heading: str) -> None:
         console.print(transfer_table(plan, heading))
         console.print(
@@ -1192,13 +1262,15 @@ def transfers(
         "row and enter it as it stands."
     )
     if thin_steps:
-        smaller = min(thin_steps) - 1
+        aside = (
+            " — the one recommended above" if chosen_size == stop_at else ""
+        )
         console.print(
-            f"[yellow]Going beyond {smaller} transfer(s) buys less than "
-            f"{THIN_MARGIN:.0f} point each time, which is inside the "
-            f"projections' own error. The {smaller}-transfer plan is the "
-            f"defensible stopping point; the longer ones are not wrong, just "
-            f"not evidenced.[/yellow]"
+            f"[yellow]Going beyond {stop_at} transfer(s) buys less "
+            f"than {THIN_MARGIN:.0f} point each time, which is inside the "
+            f"projections' own error. The {stop_at}-transfer plan is "
+            f"the defensible stopping point{aside}; the longer ones are not "
+            f"wrong, just not evidenced.[/yellow]"
         )
     if transfers_wanted is None and chosen_size:
         console.print(
@@ -1248,27 +1320,58 @@ def transfers(
             f"{abs(hit_gain):.2f} points less than it costs."
         )
 
-    xi = Table(title=f"GW{target} starting XI")
-    xi.add_column("role")
+    # The XI, bench and armband below are the recommended plan's, so the
+    # incoming players are marked: this is the team as it would stand *after*
+    # the transfers above are entered, not the one on the site right now.
+    incoming = set(best.transfers_in)
+
+    def squad_name(pid: int) -> str:
+        return f"{names.get(pid, pid)}{' (new)' if pid in incoming else ''}"
+
+    xi = Table(
+        title=f"GW{target} starting XI — the {chosen_size}-transfer plan's"
+    )
+    xi.add_column("pos")
+    xi.add_column("armband")
     xi.add_column("player")
     xi.add_column("xPts", justify="right")
     detail = best.detail
     for pid in best.squad.starting:
-        role = (
-            "captain"
+        armband = (
+            "C"
             if pid == best.squad.captain
-            else "vice" if pid == best.squad.vice else positions.get(pid, "")
+            else "V" if pid == best.squad.vice else ""
         )
-        xi.add_row(role, str(names.get(pid, pid)), f"{detail.get(pid, 0.0):.2f}")
+        xi.add_row(
+            positions.get(pid, "?"),
+            armband,
+            squad_name(pid),
+            f"{detail.get(pid, 0.0):.2f}",
+        )
     console.print(xi)
+    starting_xpts = sum(detail.get(pid, 0.0) for pid in best.squad.starting)
+    console.print(
+        f"  C {names.get(best.squad.captain, best.squad.captain)}"
+        f"  ·  V {names.get(best.squad.vice, best.squad.vice)}"
+        f"  ·  XI {starting_xpts:.2f} xPts, doubling the captain"
+        f" → {starting_xpts + detail.get(best.squad.captain, 0.0):.2f}"
+    )
 
-    bench = Table(title="bench, in order")
+    bench = Table(title="bench, in order — first to come on at the top")
     bench.add_column("#")
     bench.add_column("player")
     bench.add_column("xPts", justify="right")
     for n, pid in enumerate(best.squad.bench, start=1):
-        bench.add_row(str(n), label(pid), f"{detail.get(pid, 0.0):.2f}")
+        bench.add_row(
+            str(n),
+            f"{squad_name(pid)} ({positions.get(pid, '?')})",
+            f"{detail.get(pid, 0.0):.2f}",
+        )
     console.print(bench)
+    console.print(
+        "  [dim]A goalkeeper on the bench only ever replaces the "
+        "goalkeeper, whatever its number here.[/dim]"
+    )
 
     if notes:
         console.print("\n[bold]notes on your team[/bold]")

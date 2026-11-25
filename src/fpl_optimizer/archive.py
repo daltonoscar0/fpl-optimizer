@@ -41,6 +41,24 @@ log = logging.getLogger(__name__)
 #: The archive files this module reads, per season.
 ARCHIVE_FILES: tuple[str, ...] = ("gws/merged_gw.csv", "teams.csv", "fixtures.csv")
 
+
+def format_gw_runs(gws: list[int]) -> str:
+    """Gameweek numbers as runs: ``[12, 13, 14, 20]`` → ``"12–14, 20"``.
+
+    Mid-season, every gameweek still to come is "missing", and printing
+    twenty-seven numbers buries the one case worth noticing — a hole in the
+    middle of what has already been played.
+    """
+    runs: list[tuple[int, int]] = []
+    for gw in sorted(set(gws)):
+        if runs and gw == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], gw)
+        else:
+            runs.append((gw, gw))
+    return ", ".join(
+        str(lo) if lo == hi else f"{lo}–{hi}" for lo, hi in runs
+    )
+
 #: Position labels present in the archive that have no squad slot. 2024-25
 #: carries 322 "AM" (assistant manager) rows; those are dropped.
 NON_SQUAD_POSITIONS: tuple[str, ...] = ("AM", "MNG")
@@ -302,7 +320,9 @@ def normalize_archive_season(
     )
     missing_gws = [g for g in range(1, 39) if g not in gws]
     if missing_gws:
-        notes.append(f"gameweeks absent from merged_gw.csv: {missing_gws}")
+        notes.append(
+            f"gameweeks absent from merged_gw.csv: {format_gw_runs(missing_gws)}"
+        )
 
     return SeasonData(
         season=season,

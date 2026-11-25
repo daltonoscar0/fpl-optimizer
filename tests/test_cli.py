@@ -37,6 +37,18 @@ def plain(text: str) -> str:
     return _ANSI.sub("", text)
 
 
+def unwrapped(text: str) -> str:
+    """Plain output with rich's line wrapping and panel borders collapsed.
+
+    For asserting on a *phrase* rather than a line: rich decides where to fold
+    based on terminal width and on how long an interpolated path happens to
+    be, so `"fpl backtest all" in plain(...)` passes on one machine and fails
+    on another.
+    """
+    stripped = _ANSI.sub("", text).replace("│", " ").replace("|", " ")
+    return re.sub(r"\s+", " ", stripped)
+
+
 @pytest.fixture(autouse=True)
 def _archive_from_fixtures(monkeypatch):
     """Make ``load_season`` read the committed slice whatever season is asked for.
@@ -267,7 +279,10 @@ def test_table_omits_a_strategy_whose_total_is_not_comparable(monkeypatch, tmp_p
 def test_table_without_a_backtest_says_what_to_run(tmp_path):
     result = runner.invoke(cli.app, ["table", "--results", str(tmp_path)])
     assert result.exit_code != 0
-    assert "fpl backtest" in plain(result.stderr)
+    # Rich hard-wraps the error panel, and `tmp_path` is long, so the command
+    # to run must survive being folded across a line: the assertion collapses
+    # whitespace and the message leads with the action rather than the path.
+    assert "fpl backtest all" in unwrapped(result.stderr)
 
 
 # --- track ------------------------------------------------------------------
@@ -788,9 +803,131 @@ def test_transfers_flags_a_margin_under_a_point_as_low_confidence(
 
     assert result.exit_code == 0, result.output
     out = plain(result.stdout)
-    if "recommended transfers" in out:
-        assert "low — under a point" in out
-        assert "Low confidence on" in out
+    assert "thin" in out
+    assert "defensible stopping point" in out
+
+
+def test_defensible_size_stops_at_the_last_step_worth_more_than_the_noise():
+    """These are the GW12 figures for entry 9715000, five free transfers banked.
+
+    The objective's maximum was five transfers, and the fifth bought +0.66 —
+    under a point, so inside the projections' error. Four is the answer, and
+    before this the command recommended five while the paragraph underneath
+    named four.
+    """
+    rows = [
+        (0, 49.45),
+        (1, 52.23),
+        (2, 54.80),
+        (3, 56.65),
+        (4, 57.83),
+        (5, 58.49),
+    ]
+    assert cli.defensible_size(rows, 1.0) == 4
+
+
+def test_defensible_size_does_not_step_over_a_thin_rung_to_a_fat_one():
+    """A thin step ends the advice; a later large one does not revive it.
+
+    The optimizer re-solves per size, so size 3 being good does not make the
+    route through size 2 evidenced — and the plans are not nested, so size 3
+    cannot be reached by editing size 1.
+    """
+    assert cli.defensible_size([(0, 50.0), (1, 52.0), (2, 52.1), (3, 60.0)], 1.0) == 1
+
+
+def test_defensible_size_holds_when_even_the_first_transfer_is_thin():
+    assert cli.defensible_size([(0, 50.0), (1, 50.2)], 1.0) == 0
+
+
+def test_defensible_size_allows_every_step_when_all_clear_the_margin():
+    assert cli.defensible_size([(0, 50.0), (1, 52.0), (2, 54.0)], 1.0) == 2
+
+
+def test_defensible_size_of_holding_alone_is_zero():
+    assert cli.defensible_size([(0, 50.0)], 1.0) == 0
+
+
+def test_transfers_recommends_the_plan_its_own_margins_defend(
+    real_team, monkeypatch
+):
+    """The headline and the margin advice must not point two ways at once.
+
+    With the threshold above every real margin, no step is evidenced, so the
+    defensible stopping point is zero transfers and that is what gets
+    recommended — rather than recommending the objective's maximum and then
+    saying underneath that a smaller plan is the defensible one.
+    """
+    monkeypatch.setattr(cli, "THIN_MARGIN", 1000.0)
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert result.exit_code == 0, result.output
+    out = unwrapped(result.stdout)
+    assert "Recommended: no transfer — roll it." in out
+    # The same number in both places, and the paragraph says so rather than
+    # naming a different plan than the headline.
+    assert (
+        "The 0-transfer plan is the defensible stopping point "
+        "— the one recommended above" in out
+    )
+
+
+def test_transfers_shows_the_recommended_plans_own_xi_not_the_objectives(
+    real_team, monkeypatch
+):
+    """The XI, bench and armband belong to the plan being recommended.
+
+    Trimmed back to holding, the starting XI must be the one the current squad
+    already fields: no incoming player can appear in it.
+    """
+    monkeypatch.setattr(cli, "THIN_MARGIN", 1000.0)
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert result.exit_code == 0, result.output
+    out = unwrapped(result.stdout)
+    assert "starting XI — the 0-transfer plan's" in out
+    assert "(new)" not in out, "holding brings nobody in"
+
+
+def test_transfers_honours_an_exact_count_even_when_the_margin_is_thin(
+    real_team, monkeypatch
+):
+    """``--transfers N`` is an instruction, not a suggestion to be trimmed."""
+    monkeypatch.setattr(cli, "THIN_MARGIN", 1000.0)
+    result = runner.invoke(
+        cli.app,
+        ["transfers", "--team-id", "4242", "-s", "ep", "--transfers", "2"],
+    )
+
+    assert result.exit_code == 0, result.output
+    out = unwrapped(result.stdout)
+    assert "Planning exactly 2 transfer(s), as asked." in out
+    assert "Recommended: the 2-transfer plan." in out
+    assert "The objective's own maximum is" not in out
+
+
+def test_transfers_marks_the_armband_and_the_incoming_players(real_team):
+    """Captain, vice and who is new, so the squad can be entered as printed."""
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert result.exit_code == 0, result.output
+    out = unwrapped(result.stdout)
+    assert "pos" in out and "armband" in out
+    # The armband legend restates both names in full, whatever the column width.
+    assert re.search(r"C \S+ · V \S+ · XI [\d.]+ xPts", out), out
+    assert "doubling the captain" in out
+    assert "bench, in order — first to come on at the top" in out
+    assert "only ever replaces the goalkeeper" in out
+
+
+def test_transfers_says_what_scale_its_expected_points_are_on(real_team):
+    """9.04 "expected points" is not a gameweek score, and must not read as one."""
+    result = runner.invoke(cli.app, ["transfers", "--team-id", "4242", "-s", "ep"])
+
+    assert result.exit_code == 0, result.output
+    out = unwrapped(result.stdout)
+    assert "'expected points' is the objective" in out
+    assert "do not read a row as a GW" in out
 
 
 def test_transfers_does_not_attribute_a_margin_to_a_named_move_unless_it_can(

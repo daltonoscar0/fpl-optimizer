@@ -315,6 +315,23 @@ not: the margins fall away quickly. **Anything under a point is flagged low
 confidence**, because the projections are nowhere near that accurate — a tenth
 of a point of advantage is noise with a decimal point on it.
 
+**The recommendation stops where those margins do.** The objective maximises
+expected points, so it will always take one more transfer for a tenth of a
+point — and with five free transfers banked it takes all five. So the plan
+that gets recommended, and whose XI, bench and armband are printed, is the one
+at the last step that bought more than a point; the objective's own maximum is
+named alongside with what the surplus was, and `--transfers N` still prints
+any size entire. Before v0.1.2 the headline recommended the maximum while the
+paragraph under it named the smaller plan as the defensible one, which is
+advice pointing two ways at once.
+
+The `expected points` column is the integer program's objective, not a
+gameweek scoreline: it carries this gameweek plus a decayed average of the
+horizon (so roughly two gameweeks' worth), the bench at its weight and the
+captain counted twice, less any hit. The output says so under the table,
+because `+9.04 vs holding` read as a one-week gain would flatter every
+transfer by about double.
+
 One caveat the output states for itself: those plans are often *not* nested.
 The best single transfer is not necessarily part of the best five — the
 optimizer will drop a player it wanted at three transfers and bring them back

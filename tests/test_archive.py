@@ -12,7 +12,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from fpl_optimizer.archive import normalize_archive_season
+from fpl_optimizer.archive import format_gw_runs, normalize_archive_season
 from fpl_optimizer.projections.baselines import (
     EP_HINDSIGHT_THRESHOLD,
     ep_looks_like_hindsight,
@@ -114,6 +114,34 @@ def test_unknown_club_names_fail_loudly(raw):
 def test_absent_gameweeks_are_reported(season):
     """The slice stops at gameweek 8, and the notes say which are missing."""
     assert any("gameweeks absent" in note for note in season.notes)
+
+
+def test_absent_gameweeks_are_reported_as_runs_not_as_a_list_of_numbers(season):
+    """Mid-season every gameweek to come is absent, and the list drowns the note.
+
+    The archive slice ends at gameweek 8, so 9–38 are missing and should read
+    as one run. A hole in the middle of what has been played is the case worth
+    seeing, and it only stands out if the contiguous tail is collapsed.
+    """
+    note = next(n for n in season.notes if "gameweeks absent" in n)
+    assert "9–38" in note
+    assert "[" not in note and "," not in note.split(":", 1)[1]
+
+
+@pytest.mark.parametrize(
+    "gws, expected",
+    [
+        ([], ""),
+        ([5], "5"),
+        ([1, 2, 3], "1–3"),
+        ([12, 13, 14, 20], "12–14, 20"),
+        ([3, 9, 10, 38], "3, 9–10, 38"),
+        ([38, 3, 10, 9], "3, 9–10, 38"),
+        ([7, 7, 8], "7–8"),
+    ],
+)
+def test_format_gw_runs(gws, expected):
+    assert format_gw_runs(gws) == expected
 
 
 def test_average_manager_score_is_absent_and_said_to_be(season):
