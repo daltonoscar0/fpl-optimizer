@@ -1,0 +1,70 @@
+{
+  "season": "2026-27",
+  "gw": 13,
+  "strategy": "model",
+  "recorded_at": "2026-11-28T00:08:59.410889+00:00",
+  "deadline": "2026-12-01T18:30:00Z",
+  "squad": [
+    572,
+    356,
+    332,
+    279,
+    154,
+    40,
+    366,
+    124,
+    411,
+    170,
+    166,
+    597,
+    336,
+    88,
+    87
+  ],
+  "starting": [
+    572,
+    356,
+    332,
+    279,
+    154,
+    40,
+    366,
+    124,
+    411,
+    170,
+    166
+  ],
+  "bench": [
+    597,
+    336,
+    88,
+    87
+  ],
+  "captain": 411,
+  "vice": 154,
+  "expected_points": 54.603,
+  "transfers_in": [
+    170
+  ],
+  "transfers_out": [
+    295
+  ],
+  "transfer_hit": 0,
+  "names": {
+    "572": "Tzolakis",
+    "356": "Virgil",
+    "332": "Justin",
+    "279": "Ajayi",
+    "154": "Palmer",
+    "40": "Rogers",
+    "366": "Wirtz",
+    "124": "Gro\u00df",
+    "411": "Haaland",
+    "170": "Emegha",
+    "166": "N.Jackson",
+    "597": "Suzuki",
+    "336": "Okafor",
+    "88": "Kayode",
+    "87": "Ajer"
+  }
+}
